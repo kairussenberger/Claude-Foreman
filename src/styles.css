@@ -371,6 +371,19 @@ textarea:focus, select:focus { outline: none; border-color: var(--accent); box-s
 
 .detail-stack { display: flex; flex-direction: column; gap: 14px; min-height: 0; }
 
+/* Reply panel (paused default run awaiting an answer) */
+.reply-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 10px;
+  border: 1px solid var(--amber);
+  border-radius: 9px;
+  background: #fcf7ea;
+}
+.reply-panel.hidden { display: none; }
+.reply-label { font-size: 12px; color: var(--amber); font-weight: 600; }
+
 /* Shipper window */
 .chat {
   flex: 1 1 auto; overflow: auto; min-height: 0;

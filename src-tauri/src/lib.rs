@@ -27,6 +27,7 @@ const TESTER_MD: &str = include_str!("../templates/tester.md");
 const REVIEWER_MD: &str = include_str!("../templates/reviewer.md");
 const SHIP_MD: &str = include_str!("../templates/ship.md");
 const SHIP_AUTO_MD: &str = include_str!("../templates/ship-auto.md");
+const SETTINGS_JSON: &str = include_str!("../templates/settings.json");
 
 struct Asset {
     rel: &'static str,
@@ -41,6 +42,7 @@ fn assets() -> Vec<Asset> {
         Asset { rel: ".claude/agents/reviewer.md", contents: REVIEWER_MD },
         Asset { rel: ".claude/commands/ship.md", contents: SHIP_MD },
         Asset { rel: ".claude/commands/ship-auto.md", contents: SHIP_AUTO_MD },
+        Asset { rel: ".claude/settings.json", contents: SETTINGS_JSON },
     ]
 }
 
@@ -146,6 +148,12 @@ struct UsageEvent {
 struct ShipperEvent {
     kind: String,
     text: String,
+}
+
+#[derive(Clone, Serialize)]
+struct SessionEvent {
+    run_id: String,
+    session_id: String,
 }
 
 // --- Helpers ---
@@ -588,6 +596,7 @@ fn run_pipeline(
     permission_mode: String,
     effort: String,
     autonomous: bool,
+    resume: Option<String>,
     clean_first: bool,
 ) -> Result<(), String> {
     let root = PathBuf::from(&project);
@@ -605,7 +614,11 @@ fn run_pipeline(
     let claude = resolve_claude();
     let mode = valid_permission_mode(&permission_mode).to_string();
     let command = if autonomous { "ship-auto" } else { "ship" };
-    let prompt = format!("/{command} {request}");
+    // Fresh run → `/ship[-auto] <request>`; resumed run → send the human's answer verbatim.
+    let prompt = match &resume {
+        Some(_) => request.clone(),
+        None => format!("/{command} {request}"),
+    };
 
     let mut cmd = Command::new(&claude);
     cmd.current_dir(&root)
@@ -622,6 +635,9 @@ fn run_pipeline(
     if let Some(level) = valid_effort(&effort) {
         cmd.arg("--effort").arg(level);
     }
+    if let Some(sid) = &resume {
+        cmd.arg("--resume").arg(sid);
+    }
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("failed to launch claude ({claude}): {e}"))?;
@@ -632,11 +648,21 @@ fn run_pipeline(
         let rid = run_id.clone();
         thread::spawn(move || {
             let (mut it, mut ot, mut cr, mut cc) = (0u64, 0u64, 0u64, 0u64);
+            let mut sent_session = false;
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 if line.trim().is_empty() {
                     continue;
                 }
                 if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                    if !sent_session {
+                        if let Some(sid) = v.get("session_id").and_then(|x| x.as_str()) {
+                            let _ = app.emit(
+                                "pipeline-session",
+                                SessionEvent { run_id: rid.clone(), session_id: sid.to_string() },
+                            );
+                            sent_session = true;
+                        }
+                    }
                     match v.get("type").and_then(|x| x.as_str()).unwrap_or("") {
                         "result" => {
                             let u = v.get("usage");

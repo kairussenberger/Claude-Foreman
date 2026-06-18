@@ -33,6 +33,7 @@ type UsageEvent = {
   cache_creation: number;
   is_final: boolean;
 };
+type SessionEvent = { run_id: string; session_id: string };
 
 type StageState = "idle" | "running" | "done" | "blocked";
 type Run = {
@@ -75,6 +76,7 @@ let running = false; // default-mode single run
 let activeFile: string | null = null;
 let sessionTokens = Number(localStorage.getItem("foreman.sessionTokens") || "0");
 let appMode: "default" | "parallel" = localStorage.getItem("foreman.mode") === "parallel" ? "parallel" : "default";
+let defaultSessionId: string | null = null; // for resuming a paused default-mode run
 
 // Parallel-mode state
 const queue: string[] = [];
@@ -167,7 +169,9 @@ async function runPipeline() {
 
   resetStages();
   hideVerdict();
+  hideReply();
   resetRunUsage();
+  defaultSessionId = null;
   if (clean_first) $("log").innerHTML = "";
   setRunning(true);
   setStageState("planner", "running");
@@ -180,6 +184,7 @@ async function runPipeline() {
       permissionMode: permission_mode,
       effort,
       autonomous: false,
+      resume: null,
       cleanFirst: clean_first,
     });
     appendLog({ run_id: DEFAULT_RUN, kind: "system", text: `▶ shipping (effort: ${effort}): ${request}`, raw: "" });
@@ -334,6 +339,7 @@ function defaultStage(p: StageEvent) {
 }
 function defaultDone(p: DoneEvent) {
   setRunning(false);
+  const verdict = classifyVerdict(p.verdict);
   document.querySelectorAll<HTMLElement>("#mode-default .agent.running").forEach((el) => {
     el.classList.remove("running");
     el.classList.add("blocked");
@@ -341,10 +347,60 @@ function defaultDone(p: DoneEvent) {
   });
   showVerdict(p.verdict);
   refreshStatus();
-  notify(
-    "Foreman — pipeline finished",
-    classifyVerdict(p.verdict) ? `Verdict: ${p.verdict}` : "Pipeline stopped — check the handoff files.",
-  );
+  if (!verdict && defaultSessionId) {
+    // Paused with a question rather than a verdict — let the human answer and resume.
+    showReply();
+    notify("Foreman — needs your input", "The pipeline paused with a question. Reply in the app to continue.");
+  } else {
+    notify(
+      "Foreman — pipeline finished",
+      verdict ? `Verdict: ${p.verdict}` : "Pipeline stopped — check the handoff files.",
+    );
+  }
+}
+
+function showReply() {
+  $("reply-panel").classList.remove("hidden");
+  ($("reply-input") as HTMLTextAreaElement).focus();
+}
+function hideReply() {
+  $("reply-panel").classList.add("hidden");
+}
+async function replyContinue() {
+  if (!project || !defaultSessionId || running) return;
+  const ta = $("reply-input") as HTMLTextAreaElement;
+  const answer = ta.value.trim();
+  if (!answer) {
+    ta.focus();
+    return;
+  }
+  ta.value = "";
+  hideReply();
+  hideVerdict();
+  // Un-block any stopped stages; the file-based watcher re-syncs them as the run resumes.
+  document.querySelectorAll<HTMLElement>("#mode-default .agent.blocked").forEach((el) => {
+    el.classList.remove("blocked");
+    el.classList.add("running");
+    el.querySelector(".agent-state")!.textContent = "working…";
+  });
+  setRunning(true);
+  resetRunUsage();
+  appendLog({ run_id: DEFAULT_RUN, kind: "system", text: `↩ reply: ${answer}`, raw: "" });
+  try {
+    await invoke("run_pipeline", {
+      runId: DEFAULT_RUN,
+      project,
+      request: answer,
+      permissionMode: ($("perm-mode") as HTMLSelectElement).value,
+      effort: currentEffort(),
+      autonomous: false,
+      resume: defaultSessionId,
+      cleanFirst: false,
+    });
+  } catch (e) {
+    appendLog({ run_id: DEFAULT_RUN, kind: "stderr", text: `reply error: ${e}`, raw: "" });
+    setRunning(false);
+  }
 }
 
 // ---- Parallel / overnight mode ----
@@ -458,6 +514,7 @@ async function startOneRun(request: string) {
       permissionMode: "bypassPermissions",
       effort: currentEffort(),
       autonomous: true,
+      resume: null,
       cleanFirst: false,
     });
     run.status = "working";
@@ -613,6 +670,9 @@ listen<LogEvent>("pipeline-log", (e) => (runs.has(e.payload.run_id) ? pRunLog(e.
 listen<StageEvent>("pipeline-stage", (e) => (runs.has(e.payload.run_id) ? pRunStage(e.payload) : defaultStage(e.payload)));
 listen<UsageEvent>("pipeline-usage", (e) => (runs.has(e.payload.run_id) ? pRunUsage(e.payload) : defaultUsage(e.payload)));
 listen<DoneEvent>("pipeline-done", (e) => (runs.has(e.payload.run_id) ? pRunDone(e.payload) : defaultDone(e.payload)));
+listen<SessionEvent>("pipeline-session", (e) => {
+  if (e.payload.run_id === DEFAULT_RUN) defaultSessionId = e.payload.session_id;
+});
 
 // ---- Boot ----
 $("menu-btn").addEventListener("click", (e) => {
@@ -630,6 +690,7 @@ $("init-btn").addEventListener("click", initPipeline);
 $("run-btn").addEventListener("click", runPipeline);
 $("cancel-btn").addEventListener("click", cancel);
 $("clear-log").addEventListener("click", () => ($("log").innerHTML = ""));
+$("reply-send").addEventListener("click", replyContinue);
 $("open-finder").addEventListener("click", () => {
   if (project) revealItemInDir(project).catch(() => {});
 });
