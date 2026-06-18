@@ -4,7 +4,7 @@
 # environment, so PATH is set explicitly (node lives under nvm here).
 set -uo pipefail
 
-PROJECT="/Users/kairussenberger/Developer/foreman"
+PROJECT="$(cd "$(dirname "$0")/.." && pwd)"
 APP="/Applications/Foreman.app"
 BUILT="$PROJECT/src-tauri/target/release/bundle/macos/Foreman.app"
 
