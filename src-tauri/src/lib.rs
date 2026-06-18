@@ -149,20 +149,59 @@ fn modified_ms(path: &Path) -> Option<u64> {
     Some(dur.as_millis() as u64)
 }
 
-/// Resolve the absolute path to `claude` through a login shell, so the app finds it even
-/// when launched from Finder (where PATH is minimal). Falls back to "claude".
+/// Newest `claude` under ~/.nvm/versions/node/*/bin (npm-global installs live here).
+fn newest_nvm_claude(home: &str) -> Option<String> {
+    let base = PathBuf::from(home).join(".nvm/versions/node");
+    let mut versions: Vec<PathBuf> =
+        fs::read_dir(&base).ok()?.filter_map(|e| e.ok().map(|e| e.path())).collect();
+    versions.sort();
+    for v in versions.iter().rev() {
+        let c = v.join("bin/claude");
+        if c.exists() {
+            return Some(c.to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
+/// Find the `claude` binary. GUI/launchd launches get a minimal PATH that omits nvm/asdf,
+/// so we (1) scan known install locations, then (2) ask an *interactive* login shell
+/// (which sources ~/.zshrc where version managers live), then (3) fall back to "claude".
 fn resolve_claude() -> String {
-    if let Ok(out) = Command::new("/bin/zsh")
-        .args(["-lc", "command -v claude"])
-        .output()
-    {
-        if out.status.success() {
-            let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !p.is_empty() {
-                return p;
+    let home = std::env::var("HOME").unwrap_or_default();
+
+    let mut candidates = vec![
+        format!("{home}/.local/bin/claude"),
+        format!("{home}/.claude/local/claude"),
+        format!("{home}/bin/claude"),
+        "/opt/homebrew/bin/claude".to_string(),
+        "/usr/local/bin/claude".to_string(),
+    ];
+    if let Some(p) = newest_nvm_claude(&home) {
+        candidates.push(p);
+    }
+    for c in &candidates {
+        if Path::new(c).exists() {
+            return c.clone();
+        }
+    }
+
+    // Interactive login shell sources ~/.zshrc (nvm/fnm/volta/asdf); plain -lc does not.
+    for args in [["-ilc", "command -v claude"], ["-lc", "command -v claude"]] {
+        if let Ok(out) = Command::new("/bin/zsh")
+            .env("TERM", "xterm-256color")
+            .args(args)
+            .output()
+        {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout);
+                if let Some(p) = s.lines().map(|l| l.trim()).filter(|l| l.starts_with('/')).last() {
+                    return p.to_string();
+                }
             }
         }
     }
+
     "claude".to_string()
 }
 
