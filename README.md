@@ -15,8 +15,12 @@
 ```sh
 git clone https://github.com/kairussenberger/Claude-Foreman.git
 cd Claude-Foreman
-./scripts/install.sh          # builds + installs Foreman.app to /Applications
+./scripts/install.sh             # build + install Foreman.app
+./scripts/install-launcher.sh    # ⭐ recommended — Desktop icon that auto-updates on every launch
 ```
+
+> ### ⭐ Launch from the Desktop icon — and you're always up to date
+> The launcher's Desktop **Foreman** icon **pulls the latest features from GitHub and rebuilds before opening, every time you click it.** So whenever new features ship, you just open Foreman and you have them — no manual updates. (Prefer not to? Skip the launcher and update by hand with `git pull && ./scripts/install.sh`.)
 
 Then open Foreman → **Choose repo** → **Install agents into repo** → type a feature → hit **▶ Ship**. Watch the four figures light up in turn and a verdict land. (Prereqs in [Install](#2-install).)
 
@@ -74,13 +78,15 @@ cp -R src-tauri/target/release/bundle/macos/Foreman.app /Applications/
 
 The app is an **unsigned local build**, so the first time you open it macOS may warn about an unidentified developer — right-click the app → **Open** once, and it's trusted from then on.
 
-**Optional — auto-updating Desktop launcher.** Installs a Desktop **Foreman** icon that, on each click, **pulls the latest from GitHub, rebuilds if there are new commits, and opens the app** — so you stay on the newest version automatically:
+### ⭐ Recommended: the auto-updating launcher
+
+This is the way to run Foreman. It installs a Desktop **Foreman** icon that keeps you on the latest version automatically — on each click it **pulls new features from GitHub, rebuilds if anything changed, then opens the app**:
 
 ```sh
 ./scripts/install-launcher.sh
 ```
 
-(No launcher? Update any time with `git pull && ./scripts/install.sh`.)
+Launch from that icon and you'll never update by hand — new features just show up the next time you open it. (Rather not? Update manually any time with `git pull && ./scripts/install.sh`.)
 
 ## 3. The two modes (+ the Shipper)
 
