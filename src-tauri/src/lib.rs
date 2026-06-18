@@ -526,7 +526,36 @@ fn create_worktree(repo: String, slug: String) -> Result<WorktreeInfo, String> {
     let wt_path_str = wt_path.to_string_lossy().to_string();
     let branch = format!("foreman/{slug}");
 
-    git(&repo, &["worktree", "add", "-b", &branch, &wt_path_str, "HEAD"])?;
+    // Reuse a leftover worktree at our (deterministic, slug-keyed) path — e.g. a prior run
+    // that created the worktree then failed early. Reset tracked files to HEAD (a no-op for
+    // an early fail), reinstall agents, and clear the handoff folder for a fresh start.
+    if wt_path.join(".git").exists() {
+        let _ = git(&wt_path_str, &["reset", "--hard", "HEAD"]);
+        copy_claude_config(&repo_path, &wt_path)?;
+        let _ = clean_pipeline(wt_path_str.clone());
+        return Ok(WorktreeInfo { path: wt_path_str, branch });
+    }
+    // A stale, non-worktree directory at our path would block `worktree add` — clear it.
+    if wt_path.exists() {
+        fs::remove_dir_all(&wt_path).map_err(|e| e.to_string())?;
+    }
+    git(&repo, &["worktree", "prune"]).ok();
+
+    // The branch may already exist (created by a prior attempt). Reuse it only if it is
+    // "empty" — its tip is still the base HEAD, i.e. no committed work to clobber.
+    let branch_ref = format!("refs/heads/{branch}");
+    if git(&repo, &["rev-parse", "--verify", "--quiet", &branch_ref]).is_ok() {
+        let head = git(&repo, &["rev-parse", "HEAD"])?;
+        let tip = git(&repo, &["rev-parse", &branch])?;
+        if head != tip {
+            return Err(format!(
+                "branch '{branch}' already exists with committed work — remove it or rename the feature"
+            ));
+        }
+        git(&repo, &["worktree", "add", &wt_path_str, &branch])?;
+    } else {
+        git(&repo, &["worktree", "add", "-b", &branch, &wt_path_str, "HEAD"])?;
+    }
     copy_claude_config(&repo_path, &wt_path)?;
     Ok(WorktreeInfo { path: wt_path_str, branch })
 }
