@@ -23,7 +23,7 @@ type PipelineStatus = {
 };
 type WorktreeInfo = { path: string; branch: string };
 type LogEvent = { run_id: string; kind: string; text: string; raw: string };
-type StageEvent = { run_id: string; agent: string; file: string };
+type StageEvent = { run_id: string; agent: string; file: string; phase: "running" | "done" };
 type DoneEvent = { run_id: string; code: number | null; verdict: string | null };
 type UsageEvent = {
   run_id: string;
@@ -331,9 +331,11 @@ function renderSession() {
 
 // ---- Default-mode event handlers ----
 function defaultStage(p: StageEvent) {
+  if (p.phase === "running") {
+    setStageState(p.agent, "running");
+    return;
+  }
   setStageState(p.agent, "done");
-  const idx = STAGE_ORDER.indexOf(p.agent);
-  if (idx >= 0 && idx < STAGE_ORDER.length - 1) setStageState(STAGE_ORDER[idx + 1], "running");
   refreshStatus();
   showFile(HANDOFF_FOR[p.agent]);
 }
@@ -377,12 +379,9 @@ async function replyContinue() {
   ta.value = "";
   hideReply();
   hideVerdict();
-  // Un-block any stopped stages; the file-based watcher re-syncs them as the run resumes.
-  document.querySelectorAll<HTMLElement>("#mode-default .agent.blocked").forEach((el) => {
-    el.classList.remove("blocked");
-    el.classList.add("running");
-    el.querySelector(".agent-state")!.textContent = "working…";
-  });
+  // Reset the crew; the resumed run re-emits "done" for existing handoffs and "running"
+  // when it re-delegates, repainting the accurate state.
+  resetStages();
   setRunning(true);
   resetRunUsage();
   appendLog({ run_id: DEFAULT_RUN, kind: "system", text: `↩ reply: ${answer}`, raw: "" });
@@ -609,12 +608,10 @@ function pRunLog(p: LogEvent) {
 function pRunStage(p: StageEvent) {
   const run = runs.get(p.run_id);
   if (!run) return;
-  run.stages[p.agent] = "done";
-  const idx = STAGE_ORDER.indexOf(p.agent);
-  if (idx >= 0 && idx < STAGE_ORDER.length - 1) run.stages[STAGE_ORDER[idx + 1]] = "running";
+  run.stages[p.agent] = p.phase === "running" ? "running" : "done";
   if (run.status === "queued") run.status = "working";
   renderRunCard(run);
-  if (selectedRun === p.run_id && run.worktree) showPFile(run, HANDOFF_FOR[p.agent]);
+  if (p.phase === "done" && selectedRun === p.run_id && run.worktree) showPFile(run, HANDOFF_FOR[p.agent]);
 }
 function pRunUsage(p: UsageEvent) {
   const run = runs.get(p.run_id);

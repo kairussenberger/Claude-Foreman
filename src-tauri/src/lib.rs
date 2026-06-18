@@ -125,6 +125,7 @@ struct StageEvent {
     run_id: String,
     agent: String,
     file: String,
+    phase: String, // "running" (agent delegated) | "done" (handoff file produced)
 }
 
 #[derive(Clone, Serialize)]
@@ -685,6 +686,29 @@ fn run_pipeline(
                             );
                         }
                         "assistant" => {
+                            // A delegation (Task tool_use with subagent_type) is the accurate
+                            // moment that agent actually starts — mark it "running" now.
+                            if let Some(content) = v.pointer("/message/content").and_then(|c| c.as_array()) {
+                                for block in content {
+                                    if block.get("type").and_then(|x| x.as_str()) == Some("tool_use") {
+                                        if let Some(sub) =
+                                            block.pointer("/input/subagent_type").and_then(|x| x.as_str())
+                                        {
+                                            if AGENTS.contains(&sub) {
+                                                let _ = app.emit(
+                                                    "pipeline-stage",
+                                                    StageEvent {
+                                                        run_id: rid.clone(),
+                                                        agent: sub.to_string(),
+                                                        file: String::new(),
+                                                        phase: "running".into(),
+                                                    },
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             if let Some(u) = v.pointer("/message/usage") {
                                 let field = |k: &str| u.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
                                 it += field("input_tokens");
@@ -746,7 +770,12 @@ fn run_pipeline(
             let (agent, file) = STAGES[i];
             let _ = watch_app.emit(
                 "pipeline-stage",
-                StageEvent { run_id: rid.clone(), agent: agent.to_string(), file: file.to_string() },
+                StageEvent {
+                    run_id: rid.clone(),
+                    agent: agent.to_string(),
+                    file: file.to_string(),
+                    phase: "done".into(),
+                },
             );
         };
         loop {
