@@ -361,7 +361,9 @@ textarea:focus, select:focus { outline: none; border-color: var(--accent); box-s
 .run-tokens { font-family: var(--mono); font-size: 10.5px; color: var(--muted); white-space: nowrap; }
 .run-actions { display: flex; gap: 6px; margin-top: 2px; }
 .run-actions .mini { flex: 1 1 auto; }
-.rerun-stage { font-family: var(--mono); padding: 1px 8px; }
+/* Center the ↻ in the gap between the model select and the status pill
+   (the select sits flush above it; the .agent gap gives 6px below). */
+.rerun-stage { font-family: var(--mono); padding: 1px 8px; margin-top: 6px; }
 
 .mini-stages { display: flex; gap: 5px; align-items: center; }
 .mini-stages .md { width: 9px; height: 9px; border-radius: 50%; background: var(--border); }
