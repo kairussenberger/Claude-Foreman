@@ -334,6 +334,7 @@ textarea:focus, select:focus { outline: none; border-color: var(--accent); box-s
 .parallel { display: flex; flex-direction: column; gap: 14px; flex: 1 1 auto; min-height: 0; }
 .queue-card { flex: 0 0 auto; }
 #concurrency { width: 48px; }
+#autofix-passes { width: 40px; }
 .queue-list { display: flex; flex-direction: column; gap: 5px; }
 .queue-item {
   display: flex; align-items: center; gap: 8px; font-size: 12px;

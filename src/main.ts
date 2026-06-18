@@ -71,6 +71,11 @@ const HANDOFF_FOR: Record<string, string> = {
 };
 const HANDOFFS = ["spec.md", "changes.md", "test-results.md", "review.md"];
 const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
+const AUTOFIX_PROMPT =
+  "The review verdict was not SHIP. Read .pipeline/review.md and address EVERY finding: " +
+  "delegate to the coder to fix them, then the tester to re-run the tests, then the reviewer to " +
+  "re-review and rewrite .pipeline/review.md with an updated verdict. Work autonomously — do not " +
+  "ask me anything; make the best decision and proceed to a new verdict.";
 const DEFAULT_RUN = "default";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -92,6 +97,7 @@ let appMode: AppMode = savedMode === "parallel" || savedMode === "history" ? sav
 let defaultSessionId: string | null = null; // for resuming a paused default-mode run
 let defaultRequest = "";
 let defaultRunTokens = 0;
+let autoFixRemaining = 0;
 let history: HistoryEntry[] = JSON.parse(localStorage.getItem("foreman.history") || "[]");
 let profiles: Record<string, { effort: string; perm: string }> = JSON.parse(localStorage.getItem("foreman.profiles") || "{}");
 let editingAgent: string | null = null;
@@ -267,6 +273,9 @@ async function runPipeline() {
   defaultSessionId = null;
   defaultRequest = request;
   defaultRunTokens = 0;
+  autoFixRemaining = ($("autofix") as HTMLInputElement).checked
+    ? Math.max(1, Math.min(3, Number(($("autofix-passes") as HTMLInputElement).value) || 1))
+    : 0;
   if (clean_first) $("log").innerHTML = "";
   setRunning(true);
   setStageState("planner", "running");
@@ -413,7 +422,7 @@ function resetRunUsage() {
 function defaultUsage(u: UsageEvent) {
   if (u.is_final) {
     $("usage-run").textContent = `${fmtTokens(u.input_tokens)} in · ${fmtTokens(u.output_tokens)} out`;
-    defaultRunTokens = u.input_tokens + u.output_tokens;
+    defaultRunTokens += u.input_tokens + u.output_tokens; // accumulates across auto-fix passes
     sessionTokens += u.input_tokens + u.output_tokens;
     localStorage.setItem("foreman.sessionTokens", String(sessionTokens));
     renderSession();
@@ -449,22 +458,49 @@ function defaultDone(p: DoneEvent) {
     // Paused with a question rather than a verdict — let the human answer and resume.
     showReply();
     notify("Foreman — needs your input", "The pipeline paused with a question. Reply in the app to continue.");
-  } else {
-    recordRun({
-      time: Date.now(),
-      mode: "default",
-      repo: project || "",
-      request: defaultRequest,
-      verdict: p.verdict,
-      tokens: defaultRunTokens,
-      branch: null,
-      worktree: null,
-    });
-    notify(
-      "Foreman — pipeline finished",
-      verdict ? `Verdict: ${p.verdict}` : "Pipeline stopped — check the handoff files.",
-    );
+    return;
   }
+  if (verdict && verdict !== "ship" && autoFixRemaining > 0 && defaultSessionId) {
+    autoFixRemaining -= 1;
+    runAutoFix(p.verdict);
+    return;
+  }
+  recordRun({
+    time: Date.now(),
+    mode: "default",
+    repo: project || "",
+    request: defaultRequest,
+    verdict: p.verdict,
+    tokens: defaultRunTokens,
+    branch: null,
+    worktree: null,
+  });
+  notify(
+    "Foreman — pipeline finished",
+    verdict ? `Verdict: ${p.verdict}` : "Pipeline stopped — check the handoff files.",
+  );
+}
+
+// Auto-fix: resume the session to address a non-SHIP verdict, then re-review.
+function runAutoFix(verdict: string | null) {
+  hideVerdict();
+  resetStages();
+  resetRunUsage();
+  setRunning(true);
+  appendLog({ run_id: DEFAULT_RUN, kind: "system", text: `🔁 auto-fix: addressing ${verdict} findings…`, raw: "" });
+  invoke("run_pipeline", {
+    runId: DEFAULT_RUN,
+    project,
+    request: AUTOFIX_PROMPT,
+    permissionMode: ($("perm-mode") as HTMLSelectElement).value,
+    effort: currentEffort(),
+    autonomous: false,
+    resume: defaultSessionId,
+    cleanFirst: false,
+  }).catch((e) => {
+    appendLog({ run_id: DEFAULT_RUN, kind: "stderr", text: `auto-fix error: ${e}`, raw: "" });
+    setRunning(false);
+  });
 }
 
 function showReply() {
