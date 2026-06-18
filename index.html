@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Foreman — Agent Pipeline</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+
+  <body>
+    <header>
+      <div class="brand">⛓&nbsp;Foreman <span class="sub">agent pipeline</span></div>
+      <div class="project">
+        <span id="project-path" class="path muted">No repo selected</span>
+        <button id="choose-project">Choose repo…</button>
+        <button id="open-finder" class="mini" title="Reveal in Finder" disabled>↗</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="col left">
+        <div class="card">
+          <div class="card-title">Pipeline setup</div>
+          <div id="status-grid" class="status-grid"></div>
+          <div class="row">
+            <button id="init-btn" disabled>Install agents into repo</button>
+            <label class="checkbox"><input type="checkbox" id="force-init" /> overwrite existing</label>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Ship a feature</div>
+          <textarea
+            id="request"
+            rows="4"
+            placeholder="e.g. add rate limiting to the login endpoint — max 5 attempts/min per IP, return 429 after the limit"
+          ></textarea>
+          <div class="row">
+            <label class="field">Permissions
+              <select id="perm-mode">
+                <option value="acceptEdits" selected>acceptEdits — auto-approve edits</option>
+                <option value="default">default — prompt (interactive)</option>
+                <option value="plan">plan — no writes</option>
+                <option value="bypassPermissions">bypassPermissions — fully unattended</option>
+              </select>
+            </label>
+            <label class="checkbox"><input type="checkbox" id="clean-first" checked /> clean .pipeline first</label>
+          </div>
+          <div class="row">
+            <button id="run-btn" class="primary" disabled>▶ Ship</button>
+            <button id="cancel-btn" disabled>■ Cancel</button>
+          </div>
+          <div id="verdict" class="verdict hidden"></div>
+          <p class="hint">Tip: run on a throwaway branch or git worktree. Foreman never merges — it leaves the diff for you.</p>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Pipeline</div>
+          <ol class="stages" id="stages">
+            <li data-agent="planner"><span class="dot"></span><span class="label">Planner</span><em>opus</em><span class="state">idle</span></li>
+            <li data-agent="coder"><span class="dot"></span><span class="label">Coder</span><em>sonnet</em><span class="state">idle</span></li>
+            <li data-agent="tester"><span class="dot"></span><span class="label">Tester</span><em>sonnet</em><span class="state">idle</span></li>
+            <li data-agent="reviewer"><span class="dot"></span><span class="label">Reviewer</span><em>opus</em><span class="state">idle</span></li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="col right">
+        <div class="card grow">
+          <div class="card-title">
+            <span>Handoff files</span>
+            <div class="filetabs" id="filetabs"></div>
+          </div>
+          <div id="file-view" class="file-view markdown"><p class="muted">Handoff files appear here as each agent finishes.</p></div>
+        </div>
+
+        <div class="card logs">
+          <div class="card-title">
+            <span>Live log</span>
+            <button id="clear-log" class="mini">clear</button>
+          </div>
+          <div id="log" class="log"></div>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>
