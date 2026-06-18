@@ -371,6 +371,31 @@ textarea:focus, select:focus { outline: none; border-color: var(--accent); box-s
 
 .detail-stack { display: flex; flex-direction: column; gap: 14px; min-height: 0; }
 
+/* Preflight doctor + agent-prompt editor */
+.doctor-head {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
+  color: var(--muted); font-weight: 600; margin-top: 4px;
+}
+.doctor-list { display: flex; flex-direction: column; gap: 4px; }
+.doctor-row { display: flex; align-items: baseline; gap: 8px; font-size: 12px; }
+.doctor-row .d-mark { font-weight: 700; }
+.doctor-row.ok .d-mark { color: var(--green); }
+.doctor-row.bad .d-mark { color: var(--red); }
+.doctor-row .d-name { font-weight: 600; flex: 0 0 auto; }
+.doctor-row .d-detail { color: var(--muted); font-family: var(--mono); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prompt-edit-row .edit-agent { font-family: var(--mono); }
+
+.modal { position: fixed; inset: 0; background: rgba(20, 30, 50, 0.4); display: flex; align-items: center; justify-content: center; z-index: 100; }
+.modal.hidden { display: none; }
+.modal-box {
+  background: var(--panel); border: 1px solid var(--border-strong); border-radius: 12px;
+  width: min(840px, 90vw); height: min(80vh, 740px);
+  display: flex; flex-direction: column; gap: 10px; padding: 14px; box-shadow: var(--shadow);
+}
+.modal-head { display: flex; align-items: center; justify-content: space-between; font-weight: 600; }
+.ae-text { flex: 1 1 auto; font-family: var(--mono); font-size: 12px; line-height: 1.5; resize: none; }
+
 /* History */
 .history { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
 .history-list { display: flex; flex-direction: column; gap: 8px; overflow: auto; min-height: 0; }

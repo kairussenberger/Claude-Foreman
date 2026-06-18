@@ -45,6 +45,7 @@ type HistoryEntry = {
   branch: string | null;
   worktree: string | null;
 };
+type DoctorCheck = { name: string; ok: boolean; detail: string };
 
 type StageState = "idle" | "running" | "done" | "blocked";
 type Run = {
@@ -92,6 +93,8 @@ let defaultSessionId: string | null = null; // for resuming a paused default-mod
 let defaultRequest = "";
 let defaultRunTokens = 0;
 let history: HistoryEntry[] = JSON.parse(localStorage.getItem("foreman.history") || "[]");
+let profiles: Record<string, { effort: string; perm: string }> = JSON.parse(localStorage.getItem("foreman.profiles") || "{}");
+let editingAgent: string | null = null;
 
 // Parallel-mode state
 const queue: string[] = [];
@@ -115,8 +118,11 @@ function setProject(path: string) {
   $("project-path").classList.remove("muted");
   ($("open-finder") as HTMLButtonElement).disabled = false;
   ($("init-btn") as HTMLButtonElement).disabled = false;
+  loadProfile(path);
+  setEditAgentsEnabled(true);
   updateStartBtn();
   refreshStatus();
+  renderDoctor();
 }
 
 // ---- Status (default mode) ----
@@ -151,6 +157,77 @@ function renderStatus(status: PipelineStatus) {
   renderFileTabs(status.handoffs);
 }
 
+// ---- Config: per-project profiles, preflight doctor, agent-prompt editor ----
+function saveProfile() {
+  if (!project) return;
+  profiles[project] = {
+    effort: ($("effort") as HTMLInputElement).value,
+    perm: ($("perm-mode") as HTMLSelectElement).value,
+  };
+  localStorage.setItem("foreman.profiles", JSON.stringify(profiles));
+}
+function loadProfile(p: string) {
+  const prof = profiles[p];
+  if (!prof) return;
+  ($("effort") as HTMLInputElement).value = prof.effort;
+  ($("perm-mode") as HTMLSelectElement).value = prof.perm;
+  updateEffortLabel();
+}
+async function renderDoctor() {
+  if (!project) return;
+  const list = $("doctor-list");
+  list.innerHTML = `<p class="muted">checking…</p>`;
+  try {
+    const checks = await invoke<DoctorCheck[]>("doctor", { project });
+    list.innerHTML = "";
+    for (const c of checks) {
+      const row = document.createElement("div");
+      row.className = `doctor-row ${c.ok ? "ok" : "bad"}`;
+      row.innerHTML =
+        `<span class="d-mark">${c.ok ? "✓" : "✗"}</span>` +
+        `<span class="d-name">${escapeHtml(c.name)}</span>` +
+        `<span class="d-detail">${escapeHtml(c.detail)}</span>`;
+      list.appendChild(row);
+    }
+  } catch (e) {
+    list.innerHTML = `<p class="muted">doctor error: ${e}</p>`;
+  }
+}
+function setEditAgentsEnabled(on: boolean) {
+  document.querySelectorAll<HTMLButtonElement>(".edit-agent").forEach((b) => (b.disabled = !on));
+}
+async function openAgentEditor(agent: string) {
+  if (!project) return;
+  try {
+    const content = await invoke<string>("read_agent_file", { project, agent });
+    editingAgent = agent;
+    $("ae-title").textContent = `Edit ${agent}.md`;
+    ($("ae-text") as HTMLTextAreaElement).value = content;
+    $("agent-editor").classList.remove("hidden");
+  } catch (e) {
+    appendLog({ run_id: DEFAULT_RUN, kind: "stderr", text: `open ${agent}: ${e}`, raw: "" });
+  }
+}
+async function saveAgentEditor() {
+  if (!project || !editingAgent) return;
+  try {
+    await invoke("write_agent_file", {
+      project,
+      agent: editingAgent,
+      content: ($("ae-text") as HTMLTextAreaElement).value,
+    });
+    appendLog({ run_id: DEFAULT_RUN, kind: "system", text: `saved ${editingAgent}.md`, raw: "" });
+    closeAgentEditor();
+    refreshStatus(); // model dropdown may have changed if frontmatter was edited
+  } catch (e) {
+    appendLog({ run_id: DEFAULT_RUN, kind: "stderr", text: `save error: ${e}`, raw: "" });
+  }
+}
+function closeAgentEditor() {
+  editingAgent = null;
+  $("agent-editor").classList.add("hidden");
+}
+
 // ---- Init ----
 async function initPipeline() {
   if (!project) return;
@@ -165,6 +242,7 @@ async function initPipeline() {
       raw: "",
     });
     await refreshStatus();
+    renderDoctor();
   } catch (e) {
     appendLog({ run_id: DEFAULT_RUN, kind: "stderr", text: `init error: ${e}`, raw: "" });
   }
@@ -782,7 +860,18 @@ $("open-finder").addEventListener("click", () => {
   if (project) revealItemInDir(project).catch(() => {});
 });
 $("open-shipper").addEventListener("click", openShipper);
-$("effort").addEventListener("input", updateEffortLabel);
+$("effort").addEventListener("input", () => {
+  updateEffortLabel();
+  saveProfile();
+});
+$("perm-mode").addEventListener("change", saveProfile);
+$("doctor-refresh").addEventListener("click", renderDoctor);
+document.querySelectorAll<HTMLButtonElement>(".edit-agent").forEach((b) =>
+  b.addEventListener("click", () => openAgentEditor(b.dataset.agent!)),
+);
+$("ae-save").addEventListener("click", saveAgentEditor);
+$("ae-close").addEventListener("click", closeAgentEditor);
+$("ae-cancel").addEventListener("click", closeAgentEditor);
 document.querySelectorAll<HTMLSelectElement>(".model-select").forEach((sel) => {
   sel.addEventListener("change", async () => {
     if (!project) return;

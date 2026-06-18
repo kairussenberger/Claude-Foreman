@@ -110,6 +110,13 @@ struct WorktreeInfo {
     branch: String,
 }
 
+#[derive(Serialize)]
+struct DoctorCheck {
+    name: String,
+    ok: bool,
+    detail: String,
+}
+
 // Every run-scoped event carries `run_id` so the UI can route it. "default" = the
 // single-run (non-parallel) mode.
 #[derive(Clone, Serialize)]
@@ -220,6 +227,20 @@ fn resolve_claude() -> String {
     }
 
     "claude".to_string()
+}
+
+/// Resolve a binary via an interactive login shell (sources ~/.zshrc → nvm/fnm/etc.).
+fn which_login(bin: &str) -> Option<String> {
+    let out = Command::new("/bin/zsh")
+        .env("TERM", "xterm-256color")
+        .args(["-ilc", &format!("command -v {bin}")])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout);
+    s.lines().map(|l| l.trim()).find(|l| l.starts_with('/')).map(|l| l.to_string())
 }
 
 fn valid_permission_mode(mode: &str) -> &str {
@@ -493,6 +514,63 @@ fn set_agent_model(project: String, agent: String, model: String) -> Result<(), 
         content.push('\n');
     }
     fs::write(&path, content).map_err(|e| e.to_string())
+}
+
+/// (Config) Read a full agent prompt file for in-app editing.
+#[tauri::command]
+fn read_agent_file(project: String, agent: String) -> Result<String, String> {
+    if !AGENTS.contains(&agent.as_str()) {
+        return Err(format!("unknown agent: {agent}"));
+    }
+    let p = PathBuf::from(&project).join(format!(".claude/agents/{agent}.md"));
+    fs::read_to_string(&p).map_err(|e| e.to_string())
+}
+
+/// (Config) Write an edited agent prompt file back to the repo.
+#[tauri::command]
+fn write_agent_file(project: String, agent: String, content: String) -> Result<(), String> {
+    if !AGENTS.contains(&agent.as_str()) {
+        return Err(format!("unknown agent: {agent}"));
+    }
+    let p = PathBuf::from(&project).join(format!(".claude/agents/{agent}.md"));
+    fs::write(&p, content).map_err(|e| e.to_string())
+}
+
+/// (Config) Preflight checks for a project: claude CLI, node, git repo, pipeline installed.
+#[tauri::command]
+fn doctor(project: String) -> Vec<DoctorCheck> {
+    let mut checks = Vec::new();
+
+    let claude = resolve_claude();
+    let claude_ok = Path::new(&claude).exists();
+    checks.push(DoctorCheck {
+        name: "Claude CLI".into(),
+        ok: claude_ok,
+        detail: if claude_ok { claude } else { "not found — install / log in to Claude Code".into() },
+    });
+
+    match which_login("node") {
+        Some(p) => checks.push(DoctorCheck { name: "Node.js".into(), ok: true, detail: p }),
+        None => checks.push(DoctorCheck { name: "Node.js".into(), ok: false, detail: "not found on PATH".into() }),
+    }
+
+    let is_repo = git(&project, &["rev-parse", "--git-dir"]).is_ok();
+    checks.push(DoctorCheck {
+        name: "Git repo".into(),
+        ok: is_repo,
+        detail: if is_repo { "folder is a git repository".into() } else { "not a git repo — overnight & Shipper need git".into() },
+    });
+
+    let root = PathBuf::from(&project);
+    let agents_ok = AGENTS.iter().all(|a| root.join(format!(".claude/agents/{a}.md")).exists())
+        && root.join(".claude/commands/ship.md").exists();
+    checks.push(DoctorCheck {
+        name: "Pipeline installed".into(),
+        ok: agents_ok,
+        detail: if agents_ok { "agents + /ship present".into() } else { "click 'Install agents into repo'".into() },
+    });
+
+    checks
 }
 
 /// (2) Read one handoff file's contents for the viewer. Path-traversal guarded.
@@ -996,6 +1074,9 @@ pub fn run() {
             init_pipeline,
             pipeline_status,
             set_agent_model,
+            read_agent_file,
+            write_agent_file,
+            doctor,
             read_handoff,
             clean_pipeline,
             create_worktree,
