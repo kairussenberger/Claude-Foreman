@@ -27,4 +27,10 @@ export default defineConfig(async () => ({
       ignored: ["**/src-tauri/**"],
     },
   },
+  // Two entry points: the main cockpit and the Shipper window.
+  build: {
+    rollupOptions: {
+      input: { main: "index.html", shipper: "shipper.html" },
+    },
+  },
 }));

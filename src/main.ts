@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import {
   isPermissionGranted,
   requestPermission,
@@ -590,6 +591,23 @@ function setMode(mode: "default" | "parallel") {
   $("menu").classList.add("hidden");
 }
 
+// ---- Shipper window (5th agent) ----
+async function openShipper() {
+  const existing = await WebviewWindow.getByLabel("shipper");
+  if (existing) {
+    await existing.setFocus();
+    return;
+  }
+  new WebviewWindow("shipper", {
+    url: "shipper.html",
+    title: "Foreman — Shipper",
+    width: 760,
+    height: 760,
+    minWidth: 520,
+    minHeight: 480,
+  });
+}
+
 // ---- Event wiring (routed by run_id) ----
 listen<LogEvent>("pipeline-log", (e) => (runs.has(e.payload.run_id) ? pRunLog(e.payload) : appendLog(e.payload)));
 listen<StageEvent>("pipeline-stage", (e) => (runs.has(e.payload.run_id) ? pRunStage(e.payload) : defaultStage(e.payload)));
@@ -615,6 +633,7 @@ $("clear-log").addEventListener("click", () => ($("log").innerHTML = ""));
 $("open-finder").addEventListener("click", () => {
   if (project) revealItemInDir(project).catch(() => {});
 });
+$("open-shipper").addEventListener("click", openShipper);
 $("effort").addEventListener("input", updateEffortLabel);
 document.querySelectorAll<HTMLSelectElement>(".model-select").forEach((sel) => {
   sel.addEventListener("change", async () => {

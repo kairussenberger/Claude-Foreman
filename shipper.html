@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Foreman — Shipper</title>
+    <script type="module" src="/src/shipper.ts" defer></script>
+  </head>
+  <body>
+    <header>
+      <div class="header-left">
+        <div class="brand">⇪ Shipper <span class="sub">sonnet · medium effort</span></div>
+      </div>
+      <div class="project">
+        <span id="s-verdict" class="run-verdict queued">no verdict</span>
+        <span id="s-project" class="path muted">—</span>
+        <button id="s-refresh" class="mini" title="Re-read the verdict">↻</button>
+      </div>
+    </header>
+    <main>
+      <div id="s-chat" class="chat">
+        <div class="bubble assistant">
+          Tell me what to do with the pipeline's changes — e.g. <em>"commit these and push to a new branch, then open a PR to main"</em>, or <em>"merge the feature branch and tag v1.2.0"</em>. I read <code>.pipeline/review.md</code> and the working tree first. ⌘/Ctrl+Enter to send.
+        </div>
+      </div>
+      <div class="composer">
+        <textarea id="s-prompt" rows="2" placeholder="ship these changes to…"></textarea>
+        <div class="composer-actions">
+          <button id="s-send" class="primary">Ship ▶</button>
+          <button id="s-cancel" disabled>■</button>
+        </div>
+      </div>
+    </main>
+  </body>
+</html>

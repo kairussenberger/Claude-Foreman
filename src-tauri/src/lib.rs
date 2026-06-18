@@ -142,6 +142,12 @@ struct UsageEvent {
     is_final: bool,
 }
 
+#[derive(Clone, Serialize)]
+struct ShipperEvent {
+    kind: String,
+    text: String,
+}
+
 // --- Helpers ---
 
 fn modified_ms(path: &Path) -> Option<u64> {
@@ -773,6 +779,157 @@ fn cancel_all(state: State<RunState>) -> Result<(), String> {
     Ok(())
 }
 
+// --- (5) The Shipper: an independent, promptable agent that acts on the pipeline's output. ---
+
+const SHIPPER_PREAMBLE: &str = r#"You are the Shipper — the release/deploy assistant for this repository. A four-agent pipeline (planner → coder → tester → reviewer) has just produced changes in THIS working tree.
+
+Orient yourself before acting:
+- Read `.pipeline/review.md` for the Reviewer's VERDICT (SHIP / NEEDS WORK / BLOCK) and findings.
+- Read `.pipeline/changes.md` for what the Coder changed, and run `git status` / `git diff` to see the actual uncommitted changes.
+
+Then carry out the human's instruction below — e.g. commit, push, open a PR (use `gh`), merge, tag, or deploy. Rules:
+- If the verdict is not SHIP, point that out first; still follow an explicit instruction.
+- Never force-push or rewrite/delete history unless explicitly told to.
+- When done, report exactly what you did: the commands you ran, the branch, the remote, and any PR or commit URL."#;
+
+/// (5) Run the Shipper agent (locked to sonnet / medium effort) on the human's instruction.
+/// Keyed by "shipper" in the run map. Pass `resume` (a session id) to continue the chat.
+#[tauri::command]
+fn ship_agent(
+    app: AppHandle,
+    state: State<RunState>,
+    project: String,
+    prompt: String,
+    resume: Option<String>,
+) -> Result<(), String> {
+    let root = PathBuf::from(&project);
+    if !root.is_dir() {
+        return Err(format!("Not a directory: {project}"));
+    }
+    if state.children.lock().unwrap().contains_key("shipper") {
+        return Err("the shipper is already working".into());
+    }
+    let claude = resolve_claude();
+    // First message carries the role + context preamble; resumed turns just send the text.
+    let full_prompt = if resume.is_some() {
+        prompt.clone()
+    } else {
+        format!("{SHIPPER_PREAMBLE}\n\nInstruction: {prompt}")
+    };
+
+    let mut cmd = Command::new(&claude);
+    cmd.current_dir(&root)
+        .arg("-p")
+        .arg(&full_prompt)
+        .arg("--model")
+        .arg("sonnet")
+        .arg("--effort")
+        .arg("medium")
+        .arg("--permission-mode")
+        .arg("bypassPermissions")
+        .arg("--output-format")
+        .arg("stream-json")
+        .arg("--verbose")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(sid) = &resume {
+        cmd.arg("--resume").arg(sid);
+    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to launch claude ({claude}): {e}"))?;
+
+    if let Some(stdout) = child.stdout.take() {
+        let app = app.clone();
+        thread::spawn(move || {
+            let mut sent_session = false;
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let v: Value = match serde_json::from_str(&line) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if !sent_session {
+                    if let Some(sid) = v.get("session_id").and_then(|x| x.as_str()) {
+                        let _ = app.emit("shipper-session", sid.to_string());
+                        sent_session = true;
+                    }
+                }
+                match v.get("type").and_then(|x| x.as_str()).unwrap_or("") {
+                    "assistant" => {
+                        if let Some(content) = v.pointer("/message/content").and_then(|c| c.as_array()) {
+                            for block in content {
+                                match block.get("type").and_then(|x| x.as_str()) {
+                                    Some("text") => {
+                                        if let Some(t) = block.get("text").and_then(|x| x.as_str()) {
+                                            let t = t.trim();
+                                            if !t.is_empty() {
+                                                let _ = app.emit(
+                                                    "shipper-log",
+                                                    ShipperEvent { kind: "assistant".into(), text: t.to_string() },
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Some("tool_use") => {
+                                        let name = block.get("name").and_then(|x| x.as_str()).unwrap_or("tool");
+                                        let _ = app.emit(
+                                            "shipper-log",
+                                            ShipperEvent { kind: "tool".into(), text: format!("⚙ {name}") },
+                                        );
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    "result" => {
+                        if let Some(r) = v.get("result").and_then(|x| x.as_str()) {
+                            let _ = app.emit("shipper-log", ShipperEvent { kind: "result".into(), text: r.to_string() });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        });
+    }
+    if let Some(stderr) = child.stderr.take() {
+        let app = app.clone();
+        thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                if !line.trim().is_empty() {
+                    let _ = app.emit("shipper-log", ShipperEvent { kind: "stderr".into(), text: line });
+                }
+            }
+        });
+    }
+
+    state.children.lock().unwrap().insert("shipper".into(), child);
+
+    let children = state.children.clone();
+    let done_app = app.clone();
+    thread::spawn(move || loop {
+        let mut map = children.lock().unwrap();
+        let finished = match map.get_mut("shipper") {
+            Some(c) => matches!(c.try_wait(), Ok(Some(_)) | Err(_)),
+            None => true,
+        };
+        if finished {
+            map.remove("shipper");
+            drop(map);
+            let _ = done_app.emit("shipper-done", ());
+            break;
+        }
+        drop(map);
+        thread::sleep(Duration::from_millis(300));
+    });
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -790,7 +947,8 @@ pub fn run() {
             remove_worktree,
             run_pipeline,
             cancel_run,
-            cancel_all
+            cancel_all,
+            ship_agent
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

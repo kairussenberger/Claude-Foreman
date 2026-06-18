@@ -370,3 +370,28 @@ textarea:focus, select:focus { outline: none; border-color: var(--accent); box-s
 .run-verdict.stopped { color: var(--red); background: #fbe6e6; }
 
 .detail-stack { display: flex; flex-direction: column; gap: 14px; min-height: 0; }
+
+/* Shipper window */
+.chat {
+  flex: 1 1 auto; overflow: auto; min-height: 0;
+  display: flex; flex-direction: column; gap: 9px; padding: 2px;
+}
+.bubble {
+  border: 1px solid var(--border); border-radius: 11px; padding: 9px 13px;
+  font-size: 13px; line-height: 1.55; max-width: 90%; word-break: break-word;
+}
+.bubble.you { align-self: flex-end; background: var(--accent-soft); border-color: #cfe0fb; white-space: pre-wrap; }
+.bubble.assistant { align-self: flex-start; background: var(--panel); }
+.bubble.result { align-self: flex-start; background: #f3f8f4; border-color: #cfe7d6; }
+.bubble.tool { align-self: flex-start; background: var(--panel-2); color: var(--muted); font-family: var(--mono); font-size: 11.5px; padding: 4px 11px; }
+.bubble.stderr { align-self: flex-start; background: #fbe6e6; border-color: #e6b0b0; color: var(--red); font-family: var(--mono); font-size: 12px; white-space: pre-wrap; }
+.bubble p:first-child { margin-top: 0; }
+.bubble p:last-child { margin-bottom: 0; }
+.bubble code { font-family: var(--mono); background: var(--panel-2); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+.bubble pre { background: var(--panel-2); padding: 10px; border-radius: 8px; overflow: auto; }
+.bubble pre code { background: none; padding: 0; }
+
+.composer { display: flex; gap: 8px; align-items: stretch; flex: 0 0 auto; }
+.composer textarea { flex: 1 1 auto; }
+.composer-actions { display: flex; flex-direction: column; gap: 6px; }
+.composer-actions button { white-space: nowrap; }
