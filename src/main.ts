@@ -80,6 +80,7 @@ const queue: string[] = [];
 const runs = new Map<string, Run>();
 let activeCount = 0;
 let runCounter = 0;
+const SESSION = Date.now().toString(36).slice(-4); // distinguishes runs across app launches
 let overnightActive = false;
 let selectedRun: string | null = null;
 let pActiveFile: string | null = null;
@@ -425,7 +426,9 @@ function pump() {
 async function startOneRun(request: string) {
   if (!project) return;
   runCounter += 1;
-  const id = `r${runCounter}-${shortSlug(request)}`; // run-number prefix → unique, not mistaken for a value
+  // Unique per run (session stamp + counter) so re-prompting the same feature always makes
+  // a NEW branch — never collides with, reuses, or clobbers a previous run's worktree.
+  const id = `${shortSlug(request).slice(0, 26)}-${SESSION}${runCounter}`;
   const run: Run = {
     id,
     request,
