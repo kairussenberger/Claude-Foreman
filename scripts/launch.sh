@@ -13,6 +13,12 @@ export PATH="${NVM_BIN}:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/b
 
 cd "$PROJECT" || exit 1
 
+# Pull the latest published features (best-effort: skipped if this isn't a clone, if
+# you're offline, or if local changes block a fast-forward).
+if git rev-parse --git-dir >/dev/null 2>&1; then
+  git pull --ff-only 2>/dev/null || echo "Foreman: skipped git pull (local changes / diverged / offline)."
+fi
+
 # Installed binary (named after the cargo package — lowercase).
 installed_bin() { ls "$APP"/Contents/MacOS/* 2>/dev/null | head -1; }
 
@@ -27,7 +33,8 @@ needs_build() {
 }
 
 if needs_build; then
-  echo "Foreman: source changed — rebuilding…"
+  echo "Foreman: new version — installing deps & rebuilding…"
+  npm install --silent || true
   npm run tauri build -- --bundles app || { echo "build failed" >&2; exit 1; }
   rm -rf "$APP"
   cp -R "$BUILT" "$APP"

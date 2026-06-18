@@ -74,11 +74,13 @@ cp -R src-tauri/target/release/bundle/macos/Foreman.app /Applications/
 
 The app is an **unsigned local build**, so the first time you open it macOS may warn about an unidentified developer — right-click the app → **Open** once, and it's trusted from then on.
 
-**Optional** — a self-updating Desktop launcher that rebuilds Foreman whenever you've edited its source, then opens it:
+**Optional — auto-updating Desktop launcher.** Installs a Desktop **Foreman** icon that, on each click, **pulls the latest from GitHub, rebuilds if there are new commits, and opens the app** — so you stay on the newest version automatically:
 
 ```sh
 ./scripts/install-launcher.sh
 ```
+
+(No launcher? Update any time with `git pull && ./scripts/install.sh`.)
 
 ## 3. The two modes (+ the Shipper)
 
