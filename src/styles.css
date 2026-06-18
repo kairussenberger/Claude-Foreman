@@ -359,6 +359,9 @@ textarea:focus, select:focus { outline: none; border-color: var(--accent); box-s
 .run-meta { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .run-branch { font-family: var(--mono); font-size: 10.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .run-tokens { font-family: var(--mono); font-size: 10.5px; color: var(--muted); white-space: nowrap; }
+.run-actions { display: flex; gap: 6px; margin-top: 2px; }
+.run-actions .mini { flex: 1 1 auto; }
+.rerun-stage { font-family: var(--mono); padding: 1px 8px; }
 
 .mini-stages { display: flex; gap: 5px; align-items: center; }
 .mini-stages .md { width: 9px; height: 9px; border-radius: 50%; background: var(--border); }

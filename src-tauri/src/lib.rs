@@ -17,7 +17,9 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use serde::Serialize;
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, State};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::TrayIconBuilder;
+use tauri::{AppHandle, Emitter, Manager, State};
 
 // --- The pipeline assets, embedded in the binary. Installed into target repos/worktrees. ---
 
@@ -657,8 +659,12 @@ fn create_worktree(repo: String, slug: String) -> Result<WorktreeInfo, String> {
 
 /// (4) Remove a worktree (used by the "discard" action). The branch is kept.
 #[tauri::command]
-fn remove_worktree(repo: String, path: String) -> Result<(), String> {
+fn remove_worktree(repo: String, path: String, branch: Option<String>) -> Result<(), String> {
     git(&repo, &["worktree", "remove", &path, "--force"])?;
+    if let Some(b) = branch {
+        // Safe-delete: kept automatically if it has unmerged commits worth preserving.
+        let _ = git(&repo, &["branch", "-d", &b]);
+    }
     Ok(())
 }
 
@@ -1070,6 +1076,27 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .manage(RunState::default())
+        .setup(|app| {
+            // Menu-bar tray: Open / Quit.
+            let show = MenuItem::with_id(app, "show", "Open Foreman", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "Quit Foreman", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show, &quit])?;
+            let _tray = TrayIconBuilder::new()
+                .icon(app.default_window_icon().unwrap().clone())
+                .menu(&menu)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => {
+                        if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.show();
+                            let _ = w.set_focus();
+                        }
+                    }
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .build(app)?;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             init_pipeline,
             pipeline_status,

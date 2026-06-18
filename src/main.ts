@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { listen, emit } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -76,6 +76,12 @@ const AUTOFIX_PROMPT =
   "delegate to the coder to fix them, then the tester to re-run the tests, then the reviewer to " +
   "re-review and rewrite .pipeline/review.md with an updated verdict. Work autonomously — do not " +
   "ask me anything; make the best decision and proceed to a new verdict.";
+const STAGE_RERUN: Record<string, string> = {
+  planner: "Re-run ONLY the planner stage: re-read the codebase and rewrite .pipeline/spec.md. Do not run the other stages.",
+  coder: "Re-run ONLY the coder stage: re-implement against the current .pipeline/spec.md and rewrite .pipeline/changes.md. Do not run the other stages.",
+  tester: "Re-run ONLY the tester stage: re-run the tests for the current changes and rewrite .pipeline/test-results.md. Do not run the other stages.",
+  reviewer: "Re-run ONLY the reviewer stage: re-review the current changes and rewrite .pipeline/review.md with a fresh verdict. Do not run the other stages.",
+};
 const DEFAULT_RUN = "default";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -314,6 +320,7 @@ function setRunning(state: boolean) {
   document.querySelectorAll<HTMLSelectElement>(".model-select").forEach((s) => {
     if (state) s.disabled = true;
   });
+  updateRerunButtons();
 }
 
 // ---- Default-mode stages ----
@@ -499,6 +506,37 @@ function runAutoFix(verdict: string | null) {
     cleanFirst: false,
   }).catch((e) => {
     appendLog({ run_id: DEFAULT_RUN, kind: "stderr", text: `auto-fix error: ${e}`, raw: "" });
+    setRunning(false);
+  });
+}
+
+// Re-run a single stage by resuming the session with a stage-scoped instruction.
+function updateRerunButtons() {
+  const on = !!defaultSessionId && !running;
+  document.querySelectorAll<HTMLButtonElement>(".rerun-stage").forEach((b) => (b.disabled = !on));
+}
+function rerunStage(agent: string) {
+  if (!project || running || !defaultSessionId) return;
+  const prompt = STAGE_RERUN[agent];
+  if (!prompt) return;
+  hideVerdict();
+  hideReply();
+  autoFixRemaining = 0; // manual re-run — don't trigger the auto-fix loop
+  setStageState(agent, "running");
+  setRunning(true);
+  resetRunUsage();
+  appendLog({ run_id: DEFAULT_RUN, kind: "system", text: `↻ re-running ${agent}…`, raw: "" });
+  invoke("run_pipeline", {
+    runId: DEFAULT_RUN,
+    project,
+    request: prompt,
+    permissionMode: ($("perm-mode") as HTMLSelectElement).value,
+    effort: currentEffort(),
+    autonomous: false,
+    resume: defaultSessionId,
+    cleanFirst: false,
+  }).catch((e) => {
+    appendLog({ run_id: DEFAULT_RUN, kind: "stderr", text: `re-run error: ${e}`, raw: "" });
     setRunning(false);
   });
 }
@@ -704,6 +742,46 @@ function renderRunCard(run: Run) {
       <span class="run-tokens">${tok}</span>
       <span class="run-verdict ${pillClass(run)}">${escapeHtml(pillText(run))}</span>
     </div>`;
+  // Actions once a run has finished and has a worktree to act on.
+  if ((run.status === "done" || run.status === "stopped") && run.worktree) {
+    const actions = document.createElement("div");
+    actions.className = "run-actions";
+    const ship = document.createElement("button");
+    ship.className = "mini";
+    ship.textContent = "⇪ Ship this";
+    ship.onclick = (e) => {
+      e.stopPropagation();
+      openShipper(run.worktree);
+    };
+    const discard = document.createElement("button");
+    discard.className = "mini";
+    discard.textContent = "🗑 Discard";
+    discard.onclick = (e) => {
+      e.stopPropagation();
+      discardRun(run.id);
+    };
+    actions.append(ship, discard);
+    run.el.appendChild(actions);
+  }
+}
+async function discardRun(id: string) {
+  const run = runs.get(id);
+  if (!run || !project || !run.worktree) return;
+  try {
+    await invoke("remove_worktree", { repo: project, path: run.worktree, branch: run.branch });
+  } catch (e) {
+    appendLog({ run_id: DEFAULT_RUN, kind: "stderr", text: `discard error: ${e}`, raw: "" });
+    return;
+  }
+  run.el?.remove();
+  runs.delete(id);
+  if (selectedRun === id) {
+    selectedRun = null;
+    $("p-file-view").innerHTML = `<p class="muted">Select a run to see its handoff files.</p>`;
+    $("p-log").innerHTML = "";
+    $("detail-title").textContent = "Run detail";
+  }
+  if (!runs.size) $("runs-list").innerHTML = `<p class="muted">Queued runs appear here once you start.</p>`;
 }
 function selectRun(id: string) {
   selectedRun = id;
@@ -850,10 +928,13 @@ function setMode(mode: AppMode) {
 }
 
 // ---- Shipper window (5th agent) ----
-async function openShipper() {
+async function openShipper(repo: string | null) {
+  const target = repo || project || "";
+  localStorage.setItem("foreman.shipperTarget", target);
   const existing = await WebviewWindow.getByLabel("shipper");
   if (existing) {
     await existing.setFocus();
+    emit("shipper-retarget", { repo: target }); // re-point an already-open Shipper
     return;
   }
   new WebviewWindow("shipper", {
@@ -872,7 +953,10 @@ listen<StageEvent>("pipeline-stage", (e) => (runs.has(e.payload.run_id) ? pRunSt
 listen<UsageEvent>("pipeline-usage", (e) => (runs.has(e.payload.run_id) ? pRunUsage(e.payload) : defaultUsage(e.payload)));
 listen<DoneEvent>("pipeline-done", (e) => (runs.has(e.payload.run_id) ? pRunDone(e.payload) : defaultDone(e.payload)));
 listen<SessionEvent>("pipeline-session", (e) => {
-  if (e.payload.run_id === DEFAULT_RUN) defaultSessionId = e.payload.session_id;
+  if (e.payload.run_id === DEFAULT_RUN) {
+    defaultSessionId = e.payload.session_id;
+    updateRerunButtons();
+  }
 });
 
 // ---- Boot ----
@@ -895,7 +979,7 @@ $("reply-send").addEventListener("click", replyContinue);
 $("open-finder").addEventListener("click", () => {
   if (project) revealItemInDir(project).catch(() => {});
 });
-$("open-shipper").addEventListener("click", openShipper);
+$("open-shipper").addEventListener("click", () => openShipper(project));
 $("effort").addEventListener("input", () => {
   updateEffortLabel();
   saveProfile();
@@ -904,6 +988,9 @@ $("perm-mode").addEventListener("change", saveProfile);
 $("doctor-refresh").addEventListener("click", renderDoctor);
 document.querySelectorAll<HTMLButtonElement>(".edit-agent").forEach((b) =>
   b.addEventListener("click", () => openAgentEditor(b.dataset.agent!)),
+);
+document.querySelectorAll<HTMLButtonElement>(".rerun-stage").forEach((b) =>
+  b.addEventListener("click", () => rerunStage(b.dataset.agent!)),
 );
 $("ae-save").addEventListener("click", saveAgentEditor);
 $("ae-close").addEventListener("click", closeAgentEditor);
