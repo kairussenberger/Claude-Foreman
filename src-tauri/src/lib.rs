@@ -1,10 +1,12 @@
 // Foreman — a cockpit for the four-agent Claude Code pipeline.
 //
-// The Rust side does three jobs (the v1 priorities):
-//   1. Folder management — install the .claude/agents + .claude/commands + .pipeline scaffold into a target repo.
-//   2. Handoff files     — read/list/clean the .pipeline/*.md files the agents hand off through.
-//   3. Pipeline          — spawn `claude -p "/ship ..."` headless, stream its output, and track stage progress.
+// Jobs:
+//   1. Folder management — install the .claude/agents + .claude/commands + .pipeline scaffold.
+//   2. Handoff files     — read/list/clean the .pipeline/*.md files agents hand off through.
+//   3. Pipeline          — spawn `claude -p "/ship ..."` headless, stream output, track stages.
+//   4. Parallel runs     — each keyed by a run id; overnight runs each get a git worktree.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -17,7 +19,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
 
-// --- The pipeline assets, embedded in the binary. Installed into target repos on init. ---
+// --- The pipeline assets, embedded in the binary. Installed into target repos/worktrees. ---
 
 const PLANNER_MD: &str = include_str!("../templates/planner.md");
 const CODER_MD: &str = include_str!("../templates/coder.md");
@@ -54,11 +56,11 @@ const AGENTS: [&str; 4] = ["planner", "coder", "tester", "reviewer"];
 // `inherit` means "use the session model". Full ids (claude-opus-4-8, …) also work.
 const ALLOWED_MODELS: [&str; 5] = ["opus", "sonnet", "haiku", "fable", "inherit"];
 
-// --- Shared state: the currently running child process, so we can cancel it. ---
+// --- Shared state: in-flight child processes, keyed by run id (so runs can be parallel). ---
 
 #[derive(Default)]
 struct RunState {
-    child: Arc<Mutex<Option<Child>>>,
+    children: Arc<Mutex<HashMap<String, Child>>>,
 }
 
 // --- Serializable payloads sent to the frontend. ---
@@ -98,8 +100,17 @@ struct PipelineStatus {
     handoffs: Vec<HandoffFile>,
 }
 
+#[derive(Serialize)]
+struct WorktreeInfo {
+    path: String,
+    branch: String,
+}
+
+// Every run-scoped event carries `run_id` so the UI can route it. "default" = the
+// single-run (non-parallel) mode.
 #[derive(Clone, Serialize)]
 struct LogEvent {
+    run_id: String,
     kind: String,
     text: String,
     raw: String,
@@ -107,23 +118,25 @@ struct LogEvent {
 
 #[derive(Clone, Serialize)]
 struct StageEvent {
+    run_id: String,
     agent: String,
     file: String,
 }
 
 #[derive(Clone, Serialize)]
 struct DoneEvent {
+    run_id: String,
     code: Option<i32>,
     verdict: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
 struct UsageEvent {
+    run_id: String,
     input_tokens: u64,
     output_tokens: u64,
     cache_read: u64,
     cache_creation: u64,
-    cost_usd: Option<f64>,
     is_final: bool,
 }
 
@@ -136,8 +149,8 @@ fn modified_ms(path: &Path) -> Option<u64> {
     Some(dur.as_millis() as u64)
 }
 
-/// Resolve the absolute path to the `claude` binary through a login shell, so the app
-/// finds it even when launched from Finder (where PATH is minimal). Falls back to "claude".
+/// Resolve the absolute path to `claude` through a login shell, so the app finds it even
+/// when launched from Finder (where PATH is minimal). Falls back to "claude".
 fn resolve_claude() -> String {
     if let Ok(out) = Command::new("/bin/zsh")
         .args(["-lc", "command -v claude"])
@@ -219,9 +232,8 @@ fn classify(line: &str) -> (String, String) {
                         }
                         Some("tool_use") => {
                             let name = block.get("name").and_then(|x| x.as_str()).unwrap_or("tool");
-                            if let Some(sub) = block
-                                .pointer("/input/subagent_type")
-                                .and_then(|x| x.as_str())
+                            if let Some(sub) =
+                                block.pointer("/input/subagent_type").and_then(|x| x.as_str())
                             {
                                 parts.push(format!("⟶ delegate to {sub}"));
                             } else {
@@ -236,12 +248,7 @@ fn classify(line: &str) -> (String, String) {
         }
         "result" => {
             let res = v.get("result").and_then(|x| x.as_str()).unwrap_or("");
-            let cost = v
-                .get("total_cost_usd")
-                .and_then(|x| x.as_f64())
-                .map(|c| format!("  (${c:.4})"))
-                .unwrap_or_default();
-            ("result".into(), format!("{res}{cost}"))
+            ("result".into(), res.to_string())
         }
         other => (other.to_string(), String::new()),
     }
@@ -268,15 +275,8 @@ fn read_verdict(project: &str) -> Option<String> {
     None
 }
 
-// --- Commands ---
-
-/// (1) Folder management: install the agent + command + pipeline scaffold into a repo.
-#[tauri::command]
-fn init_pipeline(project: String, force: bool) -> Result<InitResult, String> {
-    let root = PathBuf::from(&project);
-    if !root.is_dir() {
-        return Err(format!("Not a directory: {project}"));
-    }
+/// Write the agent + command + pipeline scaffold into a root directory.
+fn install_assets(root: &Path, force: bool) -> Result<Vec<FileResult>, String> {
     let mut files = Vec::new();
     for a in assets() {
         let dest = root.join(a.rel);
@@ -295,10 +295,73 @@ fn init_pipeline(project: String, force: bool) -> Result<InitResult, String> {
         }
     }
     fs::create_dir_all(root.join(".pipeline")).map_err(|e| e.to_string())?;
+    Ok(files)
+}
+
+/// Copy the repo's own .claude config (agents + /ship) into a worktree, preserving any
+/// per-agent model edits. Falls back to the embedded default for any file the repo lacks.
+fn copy_claude_config(from: &Path, to: &Path) -> Result<(), String> {
+    for a in assets() {
+        let src = from.join(a.rel);
+        let dst = to.join(a.rel);
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        if src.exists() {
+            fs::copy(&src, &dst).map_err(|e| e.to_string())?;
+        } else {
+            fs::write(&dst, a.contents).map_err(|e| e.to_string())?;
+        }
+    }
+    fs::create_dir_all(to.join(".pipeline")).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Run a git command in `repo`, returning stdout (trimmed) or the stderr as an error.
+fn git(repo: &str, args: &[&str]) -> Result<String, String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .map_err(|e| format!("git failed to launch: {e}"))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// Slug for branch/worktree names: lowercase alphanumerics, single dashes, max 40 chars.
+fn sanitize_slug(s: &str) -> String {
+    let mut out = String::new();
+    let mut prev_dash = false;
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash && !out.is_empty() {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    out.trim_matches('-').chars().take(40).collect()
+}
+
+// --- Commands ---
+
+/// (1) Folder management: install the scaffold into a repo.
+#[tauri::command]
+fn init_pipeline(project: String, force: bool) -> Result<InitResult, String> {
+    let root = PathBuf::from(&project);
+    if !root.is_dir() {
+        return Err(format!("Not a directory: {project}"));
+    }
+    let files = install_assets(&root, force)?;
     Ok(InitResult { project, files })
 }
 
-/// (2) Report which agents/command/handoffs exist for a project.
+/// (2) Report which agents/command/handoffs exist for a project, with each agent's model.
 #[tauri::command]
 fn pipeline_status(project: String) -> Result<PipelineStatus, String> {
     let root = PathBuf::from(&project);
@@ -325,11 +388,7 @@ fn pipeline_status(project: String) -> Result<PipelineStatus, String> {
             HandoffFile {
                 name: file.to_string(),
                 exists,
-                size: if exists {
-                    fs::metadata(&p).map(|m| m.len()).unwrap_or(0)
-                } else {
-                    0
-                },
+                size: if exists { fs::metadata(&p).map(|m| m.len()).unwrap_or(0) } else { 0 },
                 modified_ms: if exists { modified_ms(&p) } else { None },
             }
         })
@@ -406,13 +465,48 @@ fn clean_pipeline(project: String) -> Result<(), String> {
     Ok(())
 }
 
-/// (3) Run the pipeline: spawn `claude -p "/ship ..."` headless and stream events.
-/// Returns immediately; progress arrives via "pipeline-log", "pipeline-stage",
-/// "pipeline-done", and "pipeline-error" events.
+/// (4) Create an isolated git worktree + branch for an overnight run, and install the
+/// agent scaffold into it (a fresh worktree won't contain untracked .claude/agents).
 #[tauri::command]
+fn create_worktree(repo: String, slug: String) -> Result<WorktreeInfo, String> {
+    git(&repo, &["rev-parse", "--git-dir"]).map_err(|_| "not a git repository".to_string())?;
+    let slug = sanitize_slug(&slug);
+    if slug.is_empty() {
+        return Err("empty slug".into());
+    }
+    let repo_path = PathBuf::from(&repo);
+    let repo_name = repo_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("repo")
+        .to_string();
+    let parent = repo_path.parent().ok_or("repo has no parent directory")?;
+    let wt_root = parent.join(".foreman-worktrees");
+    fs::create_dir_all(&wt_root).map_err(|e| e.to_string())?;
+    let wt_path = wt_root.join(format!("{repo_name}-{slug}"));
+    let wt_path_str = wt_path.to_string_lossy().to_string();
+    let branch = format!("foreman/{slug}");
+
+    git(&repo, &["worktree", "add", "-b", &branch, &wt_path_str, "HEAD"])?;
+    copy_claude_config(&repo_path, &wt_path)?;
+    Ok(WorktreeInfo { path: wt_path_str, branch })
+}
+
+/// (4) Remove a worktree (used by the "discard" action). The branch is kept.
+#[tauri::command]
+fn remove_worktree(repo: String, path: String) -> Result<(), String> {
+    git(&repo, &["worktree", "remove", &path, "--force"])?;
+    Ok(())
+}
+
+/// (3) Run the pipeline in `project`, keyed by `run_id`. Returns immediately; progress
+/// arrives via run-tagged "pipeline-log" / "-stage" / "-usage" / "-done" events.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn run_pipeline(
     app: AppHandle,
     state: State<RunState>,
+    run_id: String,
     project: String,
     request: String,
     permission_mode: String,
@@ -423,8 +517,8 @@ fn run_pipeline(
     if !root.is_dir() {
         return Err(format!("Not a directory: {project}"));
     }
-    if state.child.lock().unwrap().is_some() {
-        return Err("a pipeline run is already in progress".into());
+    if state.children.lock().unwrap().contains_key(&run_id) {
+        return Err(format!("run '{run_id}' already in progress"));
     }
     if clean_first {
         clean_pipeline(project.clone())?;
@@ -457,6 +551,7 @@ fn run_pipeline(
     // Reader: stdout (stream-json events) — also tallies token usage.
     if let Some(stdout) = child.stdout.take() {
         let app = app.clone();
+        let rid = run_id.clone();
         thread::spawn(move || {
             let (mut it, mut ot, mut cr, mut cc) = (0u64, 0u64, 0u64, 0u64);
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
@@ -465,7 +560,6 @@ fn run_pipeline(
                 }
                 if let Ok(v) = serde_json::from_str::<Value>(&line) {
                     match v.get("type").and_then(|x| x.as_str()).unwrap_or("") {
-                        // Authoritative cumulative totals for the whole run (incl. subagents).
                         "result" => {
                             let u = v.get("usage");
                             let field = |k: &str| {
@@ -477,16 +571,15 @@ fn run_pipeline(
                             let _ = app.emit(
                                 "pipeline-usage",
                                 UsageEvent {
+                                    run_id: rid.clone(),
                                     input_tokens: field("input_tokens"),
                                     output_tokens: field("output_tokens"),
                                     cache_read: field("cache_read_input_tokens"),
                                     cache_creation: field("cache_creation_input_tokens"),
-                                    cost_usd: v.get("total_cost_usd").and_then(|x| x.as_f64()),
                                     is_final: true,
                                 },
                             );
                         }
-                        // Live running tally from each assistant turn (approximate).
                         "assistant" => {
                             if let Some(u) = v.pointer("/message/usage") {
                                 let field = |k: &str| u.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
@@ -497,11 +590,11 @@ fn run_pipeline(
                                 let _ = app.emit(
                                     "pipeline-usage",
                                     UsageEvent {
+                                        run_id: rid.clone(),
                                         input_tokens: it,
                                         output_tokens: ot,
                                         cache_read: cr,
                                         cache_creation: cc,
-                                        cost_usd: None,
                                         is_final: false,
                                     },
                                 );
@@ -511,7 +604,10 @@ fn run_pipeline(
                     }
                 }
                 let (kind, text) = classify(&line);
-                let _ = app.emit("pipeline-log", LogEvent { kind, text, raw: line });
+                let _ = app.emit(
+                    "pipeline-log",
+                    LogEvent { run_id: rid.clone(), kind, text, raw: line },
+                );
             }
         });
     }
@@ -519,6 +615,7 @@ fn run_pipeline(
     // Reader: stderr (warnings / errors).
     if let Some(stderr) = child.stderr.take() {
         let app = app.clone();
+        let rid = run_id.clone();
         thread::spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                 if line.trim().is_empty() {
@@ -526,38 +623,38 @@ fn run_pipeline(
                 }
                 let _ = app.emit(
                     "pipeline-log",
-                    LogEvent { kind: "stderr".into(), text: line.clone(), raw: line },
+                    LogEvent { run_id: rid.clone(), kind: "stderr".into(), text: line.clone(), raw: line },
                 );
             }
         });
     }
 
-    *state.child.lock().unwrap() = Some(child);
+    state.children.lock().unwrap().insert(run_id.clone(), child);
 
     // Watcher: poll for stage handoff files + process completion.
-    let child_slot = state.child.clone();
+    let children = state.children.clone();
     let watch_app = app.clone();
     let watch_project = project.clone();
+    let rid = run_id.clone();
     thread::spawn(move || {
         let mut seen = [false; 4];
+        let emit_stage = |i: usize| {
+            let (agent, file) = STAGES[i];
+            let _ = watch_app.emit(
+                "pipeline-stage",
+                StageEvent { run_id: rid.clone(), agent: agent.to_string(), file: file.to_string() },
+            );
+        };
         loop {
-            for (i, (agent, file)) in STAGES.iter().enumerate() {
-                if !seen[i]
-                    && Path::new(&watch_project)
-                        .join(".pipeline")
-                        .join(file)
-                        .exists()
-                {
+            for (i, (_, file)) in STAGES.iter().enumerate() {
+                if !seen[i] && Path::new(&watch_project).join(".pipeline").join(file).exists() {
                     seen[i] = true;
-                    let _ = watch_app.emit(
-                        "pipeline-stage",
-                        StageEvent { agent: agent.to_string(), file: file.to_string() },
-                    );
+                    emit_stage(i);
                 }
             }
 
-            let mut guard = child_slot.lock().unwrap();
-            let finished = match guard.as_mut() {
+            let mut map = children.lock().unwrap();
+            let finished = match map.get_mut(&rid) {
                 Some(c) => match c.try_wait() {
                     Ok(Some(status)) => Some(status.code()),
                     Ok(None) => None,
@@ -566,27 +663,18 @@ fn run_pipeline(
                 None => Some(None), // cancelled / taken
             };
             if let Some(code) = finished {
-                *guard = None;
-                drop(guard);
-                // Final stage sweep in case files appeared at the very end.
-                for (i, (agent, file)) in STAGES.iter().enumerate() {
-                    if !seen[i]
-                        && Path::new(&watch_project)
-                            .join(".pipeline")
-                            .join(file)
-                            .exists()
-                    {
-                        let _ = watch_app.emit(
-                            "pipeline-stage",
-                            StageEvent { agent: agent.to_string(), file: file.to_string() },
-                        );
+                map.remove(&rid);
+                drop(map);
+                for (i, (_, file)) in STAGES.iter().enumerate() {
+                    if !seen[i] && Path::new(&watch_project).join(".pipeline").join(file).exists() {
+                        emit_stage(i);
                     }
                 }
                 let verdict = read_verdict(&watch_project);
-                let _ = watch_app.emit("pipeline-done", DoneEvent { code, verdict });
+                let _ = watch_app.emit("pipeline-done", DoneEvent { run_id: rid.clone(), code, verdict });
                 break;
             }
-            drop(guard);
+            drop(map);
             thread::sleep(Duration::from_millis(350));
         }
     });
@@ -594,11 +682,20 @@ fn run_pipeline(
     Ok(())
 }
 
-/// (3) Kill the in-progress run.
+/// (3/4) Kill one in-progress run.
 #[tauri::command]
-fn cancel_pipeline(state: State<RunState>) -> Result<(), String> {
-    let mut guard = state.child.lock().unwrap();
-    if let Some(mut child) = guard.take() {
+fn cancel_run(state: State<RunState>, run_id: String) -> Result<(), String> {
+    if let Some(mut child) = state.children.lock().unwrap().remove(&run_id) {
+        let _ = child.kill();
+    }
+    Ok(())
+}
+
+/// (4) Kill every in-progress run.
+#[tauri::command]
+fn cancel_all(state: State<RunState>) -> Result<(), String> {
+    let mut map = state.children.lock().unwrap();
+    for (_, mut child) in map.drain() {
         let _ = child.kill();
     }
     Ok(())
@@ -617,8 +714,11 @@ pub fn run() {
             set_agent_model,
             read_handoff,
             clean_pipeline,
+            create_worktree,
+            remove_worktree,
             run_pipeline,
-            cancel_pipeline
+            cancel_run,
+            cancel_all
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

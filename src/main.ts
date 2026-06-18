@@ -20,16 +20,32 @@ type PipelineStatus = {
   has_ship_command: boolean;
   handoffs: HandoffFile[];
 };
-type LogEvent = { kind: string; text: string; raw: string };
-type StageEvent = { agent: string; file: string };
-type DoneEvent = { code: number | null; verdict: string | null };
+type WorktreeInfo = { path: string; branch: string };
+type LogEvent = { run_id: string; kind: string; text: string; raw: string };
+type StageEvent = { run_id: string; agent: string; file: string };
+type DoneEvent = { run_id: string; code: number | null; verdict: string | null };
 type UsageEvent = {
+  run_id: string;
   input_tokens: number;
   output_tokens: number;
   cache_read: number;
   cache_creation: number;
-  cost_usd: number | null;
   is_final: boolean;
+};
+
+type StageState = "idle" | "running" | "done" | "blocked";
+type Run = {
+  id: string;
+  request: string;
+  worktree: string | null;
+  branch: string | null;
+  stages: Record<string, StageState>;
+  verdict: string | null;
+  status: "queued" | "working" | "done" | "stopped";
+  tokens: number;
+  tokensFinal: boolean;
+  log: { kind: string; text: string }[];
+  el?: HTMLElement;
 };
 
 const STAGE_ORDER = ["planner", "coder", "tester", "reviewer"];
@@ -39,22 +55,40 @@ const HANDOFF_FOR: Record<string, string> = {
   tester: "test-results.md",
   reviewer: "review.md",
 };
+const HANDOFFS = ["spec.md", "changes.md", "test-results.md", "review.md"];
 const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
+const DEFAULT_RUN = "default";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"]/g, (c) =>
+    c === "&" ? "&amp;" : c === "<" ? "&lt;" : c === ">" ? "&gt;" : "&quot;",
+  );
+}
+function fmtTokens(n: number): string {
+  return n.toLocaleString("en-US");
+}
 
 let project: string | null = localStorage.getItem("foreman.project");
-let running = false;
+let running = false; // default-mode single run
 let activeFile: string | null = null;
-let sessionCost = Number(localStorage.getItem("foreman.sessionCost") || "0");
 let sessionTokens = Number(localStorage.getItem("foreman.sessionTokens") || "0");
+let appMode: "default" | "parallel" = localStorage.getItem("foreman.mode") === "parallel" ? "parallel" : "default";
+
+// Parallel-mode state
+const queue: string[] = [];
+const runs = new Map<string, Run>();
+let activeCount = 0;
+let runCounter = 0;
+let overnightActive = false;
+let selectedRun: string | null = null;
+let pActiveFile: string | null = null;
 
 // ---- Project selection ----
 async function chooseProject() {
   const picked = await open({ directory: true, multiple: false, title: "Choose a repo" });
   if (typeof picked === "string") setProject(picked);
 }
-
 function setProject(path: string) {
   project = path;
   localStorage.setItem("foreman.project", path);
@@ -62,20 +96,19 @@ function setProject(path: string) {
   $("project-path").classList.remove("muted");
   ($("open-finder") as HTMLButtonElement).disabled = false;
   ($("init-btn") as HTMLButtonElement).disabled = false;
+  updateStartBtn();
   refreshStatus();
 }
 
-// ---- Status ----
+// ---- Status (default mode) ----
 async function refreshStatus() {
   if (!project) return;
   try {
-    const status = await invoke<PipelineStatus>("pipeline_status", { project });
-    renderStatus(status);
+    renderStatus(await invoke<PipelineStatus>("pipeline_status", { project }));
   } catch (e) {
-    appendLog({ kind: "stderr", text: `status error: ${e}`, raw: "" });
+    appendLog({ run_id: DEFAULT_RUN, kind: "stderr", text: `status error: ${e}`, raw: "" });
   }
 }
-
 function renderStatus(status: PipelineStatus) {
   const grid = $("status-grid");
   grid.innerHTML = "";
@@ -84,8 +117,6 @@ function renderStatus(status: PipelineStatus) {
     chip.className = `chip ${a.present ? "ok" : "miss"}`;
     chip.textContent = `${a.present ? "✓" : "○"} ${a.name}`;
     grid.appendChild(chip);
-
-    // Reflect the agent's current model in its crew dropdown.
     const sel = document.querySelector<HTMLSelectElement>(`.model-select[data-agent="${a.name}"]`);
     if (sel) {
       sel.disabled = !a.present || running;
@@ -97,7 +128,6 @@ function renderStatus(status: PipelineStatus) {
   cmd.className = `chip ${status.has_ship_command ? "ok" : "miss"}`;
   cmd.textContent = `${status.has_ship_command ? "✓" : "○"} /ship`;
   grid.appendChild(cmd);
-
   ($("run-btn") as HTMLButtonElement).disabled = !status.initialized || running;
   renderFileTabs(status.handoffs);
 }
@@ -110,17 +140,18 @@ async function initPipeline() {
     const res = await invoke<InitResult>("init_pipeline", { project, force });
     const created = res.files.filter((f) => f.action !== "skipped").length;
     appendLog({
+      run_id: DEFAULT_RUN,
       kind: "system",
       text: `installed pipeline — ${created} written, ${res.files.length - created} skipped`,
       raw: "",
     });
     await refreshStatus();
   } catch (e) {
-    appendLog({ kind: "stderr", text: `init error: ${e}`, raw: "" });
+    appendLog({ run_id: DEFAULT_RUN, kind: "stderr", text: `init error: ${e}`, raw: "" });
   }
 }
 
-// ---- Run ----
+// ---- Default-mode run ----
 async function runPipeline() {
   if (!project || running) return;
   const request = ($("request") as HTMLTextAreaElement).value.trim();
@@ -141,29 +172,28 @@ async function runPipeline() {
 
   try {
     await invoke("run_pipeline", {
+      runId: DEFAULT_RUN,
       project,
       request,
       permissionMode: permission_mode,
       effort,
       cleanFirst: clean_first,
     });
-    appendLog({ kind: "system", text: `▶ shipping (effort: ${effort}): ${request}`, raw: "" });
+    appendLog({ run_id: DEFAULT_RUN, kind: "system", text: `▶ shipping (effort: ${effort}): ${request}`, raw: "" });
   } catch (e) {
-    appendLog({ kind: "stderr", text: `run error: ${e}`, raw: "" });
+    appendLog({ run_id: DEFAULT_RUN, kind: "stderr", text: `run error: ${e}`, raw: "" });
     setRunning(false);
   }
 }
-
 async function cancel() {
   try {
-    await invoke("cancel_pipeline");
-    appendLog({ kind: "system", text: "■ cancelled", raw: "" });
+    await invoke("cancel_run", { runId: DEFAULT_RUN });
+    appendLog({ run_id: DEFAULT_RUN, kind: "system", text: "■ cancelled", raw: "" });
   } catch (e) {
-    appendLog({ kind: "stderr", text: `cancel error: ${e}`, raw: "" });
+    appendLog({ run_id: DEFAULT_RUN, kind: "stderr", text: `cancel error: ${e}`, raw: "" });
   }
   setRunning(false);
 }
-
 function setRunning(state: boolean) {
   running = state;
   ($("run-btn") as HTMLButtonElement).disabled = state || !project;
@@ -174,21 +204,20 @@ function setRunning(state: boolean) {
   });
 }
 
-// ---- Stages ----
+// ---- Default-mode stages ----
 function resetStages() {
   for (const agent of STAGE_ORDER) setStageState(agent, "idle");
 }
-function setStageState(agent: string, state: "idle" | "running" | "done" | "blocked") {
-  const el = document.querySelector<HTMLElement>(`.agent[data-agent="${agent}"]`);
+function setStageState(agent: string, state: StageState) {
+  const el = document.querySelector<HTMLElement>(`#mode-default .agent[data-agent="${agent}"]`);
   if (!el) return;
   el.classList.remove("running", "done", "blocked");
   if (state !== "idle") el.classList.add(state);
-  const label =
+  el.querySelector(".agent-state")!.textContent =
     state === "idle" ? "idle" : state === "running" ? "working…" : state === "done" ? "done ✓" : "stopped";
-  el.querySelector(".agent-state")!.textContent = label;
 }
 
-// ---- File viewer ----
+// ---- File viewer (default mode) ----
 function renderFileTabs(handoffs: HandoffFile[]) {
   const tabs = $("filetabs");
   tabs.innerHTML = "";
@@ -201,35 +230,33 @@ function renderFileTabs(handoffs: HandoffFile[]) {
     tabs.appendChild(btn);
   }
 }
-
 async function showFile(name: string) {
   if (!project) return;
   activeFile = name;
-  document.querySelectorAll(".filetabs button").forEach((b) => {
-    b.classList.toggle("active", b.textContent === name);
-  });
+  document.querySelectorAll("#filetabs button").forEach((b) => b.classList.toggle("active", b.textContent === name));
   try {
-    const content = await invoke<string>("read_handoff", { project, name });
-    $("file-view").innerHTML = await marked.parse(content);
+    $("file-view").innerHTML = await marked.parse(await invoke<string>("read_handoff", { project, name }));
   } catch (e) {
     $("file-view").innerHTML = `<p class="muted">Could not read ${name}: ${e}</p>`;
   }
 }
 
 // ---- Log ----
-function appendLog(evt: LogEvent) {
-  if (!evt.text && evt.kind !== "stderr") return;
-  const log = $("log");
+function writeLogLine(log: HTMLElement, kind: string, text: string) {
+  if (!text && kind !== "stderr") return;
   const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
   const line = document.createElement("div");
-  line.className = `line ${evt.kind}`;
+  line.className = `line ${kind}`;
   const k = document.createElement("span");
   k.className = "k";
-  k.textContent = evt.kind;
+  k.textContent = kind;
   line.appendChild(k);
-  line.appendChild(document.createTextNode(evt.text));
+  line.appendChild(document.createTextNode(text));
   log.appendChild(line);
   if (atBottom) log.scrollTop = log.scrollHeight;
+}
+function appendLog(evt: LogEvent) {
+  writeLogLine($("log"), evt.kind, evt.text);
 }
 
 // ---- Notifications ----
@@ -239,7 +266,7 @@ async function notify(title: string, body: string) {
   if (granted) sendNotification({ title, body });
 }
 
-// ---- Done ----
+// ---- Verdict (default mode) ----
 function classifyVerdict(v: string | null): "ship" | "needs" | "block" | null {
   if (!v) return null;
   const u = v.toUpperCase();
@@ -258,15 +285,15 @@ function showVerdict(verdict: string | null) {
   }
   el.classList.add(cls);
   el.textContent =
-    cls === "ship" ? "VERDICT: SHIP — ready for your review" :
-    cls === "needs" ? "VERDICT: NEEDS WORK — see review.md" :
-    "VERDICT: BLOCK — see review.md";
+    cls === "ship" ? "VERDICT: SHIP — ready for your review"
+      : cls === "needs" ? "VERDICT: NEEDS WORK — see review.md"
+      : "VERDICT: BLOCK — see review.md";
 }
 function hideVerdict() {
   $("verdict").className = "verdict hidden";
 }
 
-// ---- Effort (global) ----
+// ---- Effort (global, shared by both modes) ----
 function currentEffort(): string {
   const idx = Number(($("effort") as HTMLInputElement).value) - 1;
   return EFFORT_LEVELS[Math.max(0, Math.min(EFFORT_LEVELS.length - 1, idx))];
@@ -276,65 +303,305 @@ function updateEffortLabel() {
   localStorage.setItem("foreman.effort", ($("effort") as HTMLInputElement).value);
 }
 
-// ---- Usage / tokens ----
-function fmtTokens(n: number): string {
-  return n.toLocaleString("en-US");
-}
+// ---- Usage (default mode, tokens only) ----
 function resetRunUsage() {
   $("usage-run").textContent = "running…";
-  $("usage-cost").textContent = "—";
 }
-function renderUsage(u: UsageEvent) {
+function defaultUsage(u: UsageEvent) {
   if (u.is_final) {
-    // Authoritative cumulative totals for the whole run (incl. subagents).
     $("usage-run").textContent = `${fmtTokens(u.input_tokens)} in · ${fmtTokens(u.output_tokens)} out`;
-    $("usage-cost").textContent = u.cost_usd != null ? `$${u.cost_usd.toFixed(4)}` : "—";
     sessionTokens += u.input_tokens + u.output_tokens;
-    if (u.cost_usd != null) sessionCost += u.cost_usd;
     localStorage.setItem("foreman.sessionTokens", String(sessionTokens));
-    localStorage.setItem("foreman.sessionCost", String(sessionCost));
     renderSession();
   } else {
-    // Live progress: input per turn re-counts context, so only output is meaningful.
     $("usage-run").textContent = `${fmtTokens(u.output_tokens)} out (so far)`;
   }
 }
 function renderSession() {
-  $("usage-session").textContent = `$${sessionCost.toFixed(4)} · ${fmtTokens(sessionTokens)} tok`;
+  $("usage-session").textContent = `${fmtTokens(sessionTokens)} tok`;
 }
 
-// ---- Event wiring ----
-listen<LogEvent>("pipeline-log", (e) => appendLog(e.payload));
-listen<UsageEvent>("pipeline-usage", (e) => renderUsage(e.payload));
-
-listen<StageEvent>("pipeline-stage", (e) => {
-  const { agent } = e.payload;
-  setStageState(agent, "done");
-  const idx = STAGE_ORDER.indexOf(agent);
+// ---- Default-mode event handlers ----
+function defaultStage(p: StageEvent) {
+  setStageState(p.agent, "done");
+  const idx = STAGE_ORDER.indexOf(p.agent);
   if (idx >= 0 && idx < STAGE_ORDER.length - 1) setStageState(STAGE_ORDER[idx + 1], "running");
   refreshStatus();
-  showFile(HANDOFF_FOR[agent]); // auto-open the freshly produced handoff
-});
-
-listen<DoneEvent>("pipeline-done", async (e) => {
+  showFile(HANDOFF_FOR[p.agent]);
+}
+function defaultDone(p: DoneEvent) {
   setRunning(false);
-  const { verdict } = e.payload;
-  // Any stage still "working" but with no handoff means the pipeline stopped early.
-  document.querySelectorAll<HTMLElement>(".agent.running").forEach((el) => {
+  document.querySelectorAll<HTMLElement>("#mode-default .agent.running").forEach((el) => {
     el.classList.remove("running");
     el.classList.add("blocked");
     el.querySelector(".agent-state")!.textContent = "stopped";
   });
-  showVerdict(verdict);
-  await refreshStatus();
-  const v = classifyVerdict(verdict);
+  showVerdict(p.verdict);
+  refreshStatus();
   notify(
     "Foreman — pipeline finished",
-    v ? `Verdict: ${verdict}` : "Pipeline stopped — check the handoff files.",
+    classifyVerdict(p.verdict) ? `Verdict: ${p.verdict}` : "Pipeline stopped — check the handoff files.",
   );
-});
+}
+
+// ---- Parallel / overnight mode ----
+function shortSlug(s: string): string {
+  const slug = s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").split("-").slice(0, 5).join("-").slice(0, 32);
+  return slug || "run";
+}
+function updateStartBtn() {
+  ($("start-overnight") as HTMLButtonElement).disabled = !project || queue.length === 0 || overnightActive;
+}
+function addToQueue() {
+  const ta = $("queue-input") as HTMLTextAreaElement;
+  const req = ta.value.trim();
+  if (!req) {
+    ta.focus();
+    return;
+  }
+  queue.push(req);
+  ta.value = "";
+  renderQueueList();
+  updateStartBtn();
+}
+function renderQueueList() {
+  const list = $("queue-list");
+  list.innerHTML = "";
+  queue.forEach((req, i) => {
+    const item = document.createElement("div");
+    item.className = "queue-item";
+    const t = document.createElement("span");
+    t.className = "q-text";
+    t.textContent = req;
+    const x = document.createElement("button");
+    x.textContent = "×";
+    x.title = "remove";
+    x.onclick = () => {
+      queue.splice(i, 1);
+      renderQueueList();
+      updateStartBtn();
+    };
+    item.append(t, x);
+    list.appendChild(item);
+  });
+}
+function startOvernight() {
+  if (!project || queue.length === 0) return;
+  overnightActive = true;
+  updateStartBtn();
+  ($("stop-all") as HTMLButtonElement).disabled = false;
+  pump();
+}
+async function stopAll() {
+  await invoke("cancel_all").catch(() => {});
+  overnightActive = false;
+  for (const run of runs.values()) {
+    if (run.status === "working" || run.status === "queued") {
+      run.status = "stopped";
+      renderRunCard(run);
+    }
+  }
+  activeCount = 0;
+  ($("stop-all") as HTMLButtonElement).disabled = true;
+  updateStartBtn();
+}
+function pump() {
+  if (!overnightActive) return;
+  const n = Math.max(1, Math.min(6, Number(($("concurrency") as HTMLInputElement).value) || 2));
+  while (activeCount < n && queue.length > 0) {
+    const req = queue.shift()!;
+    renderQueueList();
+    void startOneRun(req);
+  }
+  if (queue.length === 0 && activeCount === 0) {
+    overnightActive = false;
+    updateStartBtn();
+    ($("stop-all") as HTMLButtonElement).disabled = true;
+    const done = [...runs.values()].filter((r) => r.status === "done").length;
+    notify("Foreman — overnight finished", `${done} run(s) complete. Review the verdicts in the morning.`);
+  }
+}
+async function startOneRun(request: string) {
+  if (!project) return;
+  runCounter += 1;
+  const id = `${shortSlug(request)}-${runCounter}`;
+  const run: Run = {
+    id,
+    request,
+    worktree: null,
+    branch: null,
+    stages: { planner: "idle", coder: "idle", tester: "idle", reviewer: "idle" },
+    verdict: null,
+    status: "queued",
+    tokens: 0,
+    tokensFinal: false,
+    log: [],
+  };
+  runs.set(id, run);
+  activeCount += 1;
+  renderRunCard(run);
+  if (!selectedRun) selectRun(id);
+  try {
+    const wt = await invoke<WorktreeInfo>("create_worktree", { repo: project, slug: id });
+    run.worktree = wt.path;
+    run.branch = wt.branch;
+    renderRunCard(run);
+    await invoke("run_pipeline", {
+      runId: id,
+      project: wt.path,
+      request,
+      permissionMode: ($("perm-mode") as HTMLSelectElement).value,
+      effort: currentEffort(),
+      cleanFirst: false,
+    });
+    run.status = "working";
+    run.stages.planner = "running";
+    renderRunCard(run);
+    pRunLog({ run_id: id, kind: "system", text: `▶ ${request}`, raw: "" });
+  } catch (e) {
+    run.status = "stopped";
+    pRunLog({ run_id: id, kind: "stderr", text: `run error: ${e}`, raw: "" });
+    renderRunCard(run);
+    activeCount = Math.max(0, activeCount - 1);
+    pump();
+  }
+}
+function pillClass(run: Run): string {
+  if (run.status === "queued") return "queued";
+  if (run.status === "working") return "working";
+  if (run.status === "stopped") return "stopped";
+  return classifyVerdict(run.verdict) || "stopped";
+}
+function pillText(run: Run): string {
+  if (run.status === "queued") return "queued";
+  if (run.status === "working") return "working";
+  if (run.status === "stopped") return "stopped";
+  return run.verdict || "done";
+}
+function renderRunCard(run: Run) {
+  const list = $("runs-list");
+  if (!run.el) {
+    if (list.querySelector(".muted")) list.innerHTML = "";
+    const card = document.createElement("div");
+    card.className = "run-card";
+    card.dataset.id = run.id;
+    card.onclick = () => selectRun(run.id);
+    list.appendChild(card);
+    run.el = card;
+  }
+  run.el.classList.toggle("selected", selectedRun === run.id);
+  const dots = STAGE_ORDER.map((a) => `<span class="md ${run.stages[a] === "idle" ? "" : run.stages[a]}"></span>`).join("");
+  const tok = run.tokens ? `${fmtTokens(run.tokens)} tok${run.tokensFinal ? "" : "…"}` : "";
+  run.el.innerHTML = `
+    <div class="run-req">${escapeHtml(run.request)}</div>
+    <div class="mini-stages">${dots}</div>
+    <div class="run-meta">
+      <span class="run-branch">${run.branch ? escapeHtml(run.branch) : "creating worktree…"}</span>
+      <span class="run-tokens">${tok}</span>
+      <span class="run-verdict ${pillClass(run)}">${escapeHtml(pillText(run))}</span>
+    </div>`;
+}
+function selectRun(id: string) {
+  selectedRun = id;
+  const run = runs.get(id);
+  if (!run) return;
+  document.querySelectorAll(".run-card").forEach((c) => c.classList.toggle("selected", (c as HTMLElement).dataset.id === id));
+  $("detail-title").textContent = run.request.slice(0, 90);
+  renderPFileTabs(run);
+  $("p-log").innerHTML = "";
+  for (const l of run.log) writeLogLine($("p-log"), l.kind, l.text);
+  if (run.worktree) showPFile(run, run.verdict ? "review.md" : "spec.md");
+  else $("p-file-view").innerHTML = `<p class="muted">Worktree is being created…</p>`;
+}
+function renderPFileTabs(run: Run) {
+  const tabs = $("p-filetabs");
+  tabs.innerHTML = "";
+  for (const name of HANDOFFS) {
+    const btn = document.createElement("button");
+    btn.textContent = name;
+    btn.disabled = !run.worktree;
+    if (name === pActiveFile) btn.classList.add("active");
+    btn.onclick = () => showPFile(run, name);
+    tabs.appendChild(btn);
+  }
+}
+async function showPFile(run: Run, name: string) {
+  if (!run.worktree) return;
+  pActiveFile = name;
+  document.querySelectorAll("#p-filetabs button").forEach((b) => b.classList.toggle("active", b.textContent === name));
+  try {
+    $("p-file-view").innerHTML = await marked.parse(await invoke<string>("read_handoff", { project: run.worktree, name }));
+  } catch {
+    $("p-file-view").innerHTML = `<p class="muted">${name} not produced yet.</p>`;
+  }
+}
+function pRunLog(p: LogEvent) {
+  const run = runs.get(p.run_id);
+  if (!run) return;
+  if (!p.text && p.kind !== "stderr") return;
+  run.log.push({ kind: p.kind, text: p.text });
+  if (run.log.length > 500) run.log.shift();
+  if (selectedRun === p.run_id) writeLogLine($("p-log"), p.kind, p.text);
+}
+function pRunStage(p: StageEvent) {
+  const run = runs.get(p.run_id);
+  if (!run) return;
+  run.stages[p.agent] = "done";
+  const idx = STAGE_ORDER.indexOf(p.agent);
+  if (idx >= 0 && idx < STAGE_ORDER.length - 1) run.stages[STAGE_ORDER[idx + 1]] = "running";
+  if (run.status === "queued") run.status = "working";
+  renderRunCard(run);
+  if (selectedRun === p.run_id && run.worktree) showPFile(run, HANDOFF_FOR[p.agent]);
+}
+function pRunUsage(p: UsageEvent) {
+  const run = runs.get(p.run_id);
+  if (!run) return;
+  run.tokens = p.is_final ? p.input_tokens + p.output_tokens : p.output_tokens;
+  run.tokensFinal = p.is_final;
+  renderRunCard(run);
+}
+function pRunDone(p: DoneEvent) {
+  const run = runs.get(p.run_id);
+  if (!run) return;
+  run.verdict = p.verdict;
+  run.status = "done";
+  for (const a of STAGE_ORDER) {
+    if (run.stages[a] === "running") run.stages[a] = p.verdict ? "done" : "blocked";
+  }
+  renderRunCard(run);
+  activeCount = Math.max(0, activeCount - 1);
+  if (selectedRun === run.id && run.worktree) showPFile(run, "review.md");
+  pump();
+}
+
+// ---- Mode switching ----
+function setMode(mode: "default" | "parallel") {
+  appMode = mode;
+  localStorage.setItem("foreman.mode", mode);
+  ($("mode-default") as HTMLElement).hidden = mode !== "default";
+  ($("mode-parallel") as HTMLElement).hidden = mode !== "parallel";
+  document.querySelectorAll(".menu-item").forEach((m) => m.classList.toggle("active", (m as HTMLElement).dataset.mode === mode));
+  $("mode-tag").textContent = mode === "parallel" ? "overnight" : "agent pipeline";
+  $("menu").classList.add("hidden");
+}
+
+// ---- Event wiring (routed by run_id) ----
+listen<LogEvent>("pipeline-log", (e) => (runs.has(e.payload.run_id) ? pRunLog(e.payload) : appendLog(e.payload)));
+listen<StageEvent>("pipeline-stage", (e) => (runs.has(e.payload.run_id) ? pRunStage(e.payload) : defaultStage(e.payload)));
+listen<UsageEvent>("pipeline-usage", (e) => (runs.has(e.payload.run_id) ? pRunUsage(e.payload) : defaultUsage(e.payload)));
+listen<DoneEvent>("pipeline-done", (e) => (runs.has(e.payload.run_id) ? pRunDone(e.payload) : defaultDone(e.payload)));
 
 // ---- Boot ----
+$("menu-btn").addEventListener("click", (e) => {
+  e.stopPropagation();
+  $("menu").classList.toggle("hidden");
+});
+$("menu").addEventListener("click", (e) => e.stopPropagation());
+document.addEventListener("click", () => $("menu").classList.add("hidden"));
+document.querySelectorAll(".menu-item").forEach((m) =>
+  m.addEventListener("click", () => setMode((m as HTMLElement).dataset.mode as "default" | "parallel")),
+);
+
 $("choose-project").addEventListener("click", chooseProject);
 $("init-btn").addEventListener("click", initPipeline);
 $("run-btn").addEventListener("click", runPipeline);
@@ -350,21 +617,27 @@ document.querySelectorAll<HTMLSelectElement>(".model-select").forEach((sel) => {
     const agent = sel.dataset.agent!;
     try {
       await invoke("set_agent_model", { project, agent, model: sel.value });
-      appendLog({ kind: "system", text: `${agent} → ${sel.value}`, raw: "" });
+      appendLog({ run_id: DEFAULT_RUN, kind: "system", text: `${agent} → ${sel.value}`, raw: "" });
     } catch (err) {
-      appendLog({ kind: "stderr", text: `set model error: ${err}`, raw: "" });
-      refreshStatus(); // revert dropdown to the file's actual value
+      appendLog({ run_id: DEFAULT_RUN, kind: "stderr", text: `set model error: ${err}`, raw: "" });
+      refreshStatus();
     }
   });
 });
+
+$("queue-add").addEventListener("click", addToQueue);
+$("start-overnight").addEventListener("click", startOvernight);
+$("stop-all").addEventListener("click", stopAll);
+$("p-clear-log").addEventListener("click", () => ($("p-log").innerHTML = ""));
 
 const savedEffort = localStorage.getItem("foreman.effort");
 if (savedEffort) ($("effort") as HTMLInputElement).value = savedEffort;
 updateEffortLabel();
 renderSession();
+setMode(appMode);
 
 if (project) {
   setProject(project);
 } else {
-  appendLog({ kind: "system", text: "choose a repo to begin", raw: "" });
+  appendLog({ run_id: DEFAULT_RUN, kind: "system", text: "choose a repo to begin", raw: "" });
 }
