@@ -34,6 +34,17 @@ type UsageEvent = {
   is_final: boolean;
 };
 type SessionEvent = { run_id: string; session_id: string };
+type AppMode = "default" | "parallel" | "history";
+type HistoryEntry = {
+  time: number;
+  mode: "default" | "parallel";
+  repo: string;
+  request: string;
+  verdict: string | null;
+  tokens: number;
+  branch: string | null;
+  worktree: string | null;
+};
 
 type StageState = "idle" | "running" | "done" | "blocked";
 type Run = {
@@ -75,8 +86,12 @@ let project: string | null = localStorage.getItem("foreman.project");
 let running = false; // default-mode single run
 let activeFile: string | null = null;
 let sessionTokens = Number(localStorage.getItem("foreman.sessionTokens") || "0");
-let appMode: "default" | "parallel" = localStorage.getItem("foreman.mode") === "parallel" ? "parallel" : "default";
+const savedMode = localStorage.getItem("foreman.mode");
+let appMode: AppMode = savedMode === "parallel" || savedMode === "history" ? savedMode : "default";
 let defaultSessionId: string | null = null; // for resuming a paused default-mode run
+let defaultRequest = "";
+let defaultRunTokens = 0;
+let history: HistoryEntry[] = JSON.parse(localStorage.getItem("foreman.history") || "[]");
 
 // Parallel-mode state
 const queue: string[] = [];
@@ -172,6 +187,8 @@ async function runPipeline() {
   hideReply();
   resetRunUsage();
   defaultSessionId = null;
+  defaultRequest = request;
+  defaultRunTokens = 0;
   if (clean_first) $("log").innerHTML = "";
   setRunning(true);
   setStageState("planner", "running");
@@ -318,6 +335,7 @@ function resetRunUsage() {
 function defaultUsage(u: UsageEvent) {
   if (u.is_final) {
     $("usage-run").textContent = `${fmtTokens(u.input_tokens)} in · ${fmtTokens(u.output_tokens)} out`;
+    defaultRunTokens = u.input_tokens + u.output_tokens;
     sessionTokens += u.input_tokens + u.output_tokens;
     localStorage.setItem("foreman.sessionTokens", String(sessionTokens));
     renderSession();
@@ -354,6 +372,16 @@ function defaultDone(p: DoneEvent) {
     showReply();
     notify("Foreman — needs your input", "The pipeline paused with a question. Reply in the app to continue.");
   } else {
+    recordRun({
+      time: Date.now(),
+      mode: "default",
+      repo: project || "",
+      request: defaultRequest,
+      verdict: p.verdict,
+      tokens: defaultRunTokens,
+      branch: null,
+      worktree: null,
+    });
     notify(
       "Foreman — pipeline finished",
       verdict ? `Verdict: ${p.verdict}` : "Pipeline stopped — check the handoff files.",
@@ -629,20 +657,82 @@ function pRunDone(p: DoneEvent) {
     if (run.stages[a] === "running") run.stages[a] = p.verdict ? "done" : "blocked";
   }
   renderRunCard(run);
+  recordRun({
+    time: Date.now(),
+    mode: "parallel",
+    repo: project || "",
+    request: run.request,
+    verdict: run.verdict,
+    tokens: run.tokens,
+    branch: run.branch,
+    worktree: run.worktree,
+  });
   activeCount = Math.max(0, activeCount - 1);
   if (selectedRun === run.id && run.worktree) showPFile(run, "review.md");
   pump();
 }
 
+// ---- History ----
+function recordRun(entry: HistoryEntry) {
+  history.unshift(entry);
+  if (history.length > 150) history.length = 150;
+  localStorage.setItem("foreman.history", JSON.stringify(history));
+  if (appMode === "history") renderHistory();
+}
+function renderHistory() {
+  const list = $("history-list");
+  if (!history.length) {
+    list.innerHTML = `<p class="muted">No runs yet.</p>`;
+    return;
+  }
+  list.innerHTML = "";
+  for (const h of history) {
+    const item = document.createElement("div");
+    item.className = "history-item";
+    const main = document.createElement("div");
+    main.className = "h-main";
+    const req = document.createElement("div");
+    req.className = "h-req";
+    req.textContent = h.request || "(no request)";
+    const when = new Date(h.time).toLocaleString();
+    const repoName = h.repo.split("/").pop() || h.repo;
+    const meta = document.createElement("div");
+    meta.className = "h-meta";
+    meta.innerHTML =
+      `<span class="h-mode">${h.mode}</span>` +
+      `<span>${escapeHtml(when)}</span>` +
+      `<span>${escapeHtml(repoName)}</span>` +
+      (h.branch ? `<span>${escapeHtml(h.branch)}</span>` : "") +
+      `<span>${fmtTokens(h.tokens)} tok</span>`;
+    main.append(req, meta);
+    const pill = document.createElement("span");
+    pill.className = `run-verdict ${classifyVerdict(h.verdict) || "stopped"}`;
+    pill.textContent = h.verdict || "stopped";
+    item.append(main, pill);
+    if (h.worktree) {
+      const wt = h.worktree;
+      const rev = document.createElement("button");
+      rev.className = "mini";
+      rev.textContent = "↗";
+      rev.title = "Reveal worktree in Finder";
+      rev.onclick = () => revealItemInDir(wt).catch(() => {});
+      item.append(rev);
+    }
+    list.appendChild(item);
+  }
+}
+
 // ---- Mode switching ----
-function setMode(mode: "default" | "parallel") {
+function setMode(mode: AppMode) {
   appMode = mode;
   localStorage.setItem("foreman.mode", mode);
   ($("mode-default") as HTMLElement).hidden = mode !== "default";
   ($("mode-parallel") as HTMLElement).hidden = mode !== "parallel";
+  ($("mode-history") as HTMLElement).hidden = mode !== "history";
   document.querySelectorAll(".menu-item").forEach((m) => m.classList.toggle("active", (m as HTMLElement).dataset.mode === mode));
-  $("mode-tag").textContent = mode === "parallel" ? "overnight" : "agent pipeline";
+  $("mode-tag").textContent = mode === "parallel" ? "overnight" : mode === "history" ? "history" : "agent pipeline";
   $("menu").classList.add("hidden");
+  if (mode === "history") renderHistory();
 }
 
 // ---- Shipper window (5th agent) ----
@@ -679,7 +769,7 @@ $("menu-btn").addEventListener("click", (e) => {
 $("menu").addEventListener("click", (e) => e.stopPropagation());
 document.addEventListener("click", () => $("menu").classList.add("hidden"));
 document.querySelectorAll(".menu-item").forEach((m) =>
-  m.addEventListener("click", () => setMode((m as HTMLElement).dataset.mode as "default" | "parallel")),
+  m.addEventListener("click", () => setMode((m as HTMLElement).dataset.mode as AppMode)),
 );
 
 $("choose-project").addEventListener("click", chooseProject);
@@ -711,6 +801,11 @@ $("queue-add").addEventListener("click", addToQueue);
 $("start-overnight").addEventListener("click", startOvernight);
 $("stop-all").addEventListener("click", stopAll);
 $("p-clear-log").addEventListener("click", () => ($("p-log").innerHTML = ""));
+$("history-clear").addEventListener("click", () => {
+  history = [];
+  localStorage.setItem("foreman.history", "[]");
+  renderHistory();
+});
 
 const savedEffort = localStorage.getItem("foreman.effort");
 if (savedEffort) ($("effort") as HTMLInputElement).value = savedEffort;

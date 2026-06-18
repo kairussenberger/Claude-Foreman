@@ -371,6 +371,18 @@ textarea:focus, select:focus { outline: none; border-color: var(--accent); box-s
 
 .detail-stack { display: flex; flex-direction: column; gap: 14px; min-height: 0; }
 
+/* History */
+.history { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+.history-list { display: flex; flex-direction: column; gap: 8px; overflow: auto; min-height: 0; }
+.history-item {
+  display: flex; align-items: center; gap: 10px;
+  border: 1px solid var(--border); border-radius: 9px; padding: 9px 12px; background: var(--panel);
+}
+.history-item .h-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.history-item .h-req { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.history-item .h-meta { font-size: 11px; color: var(--muted); font-family: var(--mono); display: flex; gap: 10px; flex-wrap: wrap; }
+.h-mode { text-transform: uppercase; font-size: 9.5px; font-weight: 700; padding: 1px 6px; border-radius: 8px; background: var(--panel-2); color: var(--muted); letter-spacing: 0.3px; }
+
 /* Reply panel (paused default run awaiting an answer) */
 .reply-panel {
   display: flex;

@@ -25,6 +25,7 @@
     <div id="menu" class="menu hidden">
       <button class="menu-item" data-mode="default">Default mode<small>one feature at a time</small></button>
       <button class="menu-item" data-mode="parallel">Parallelised — overnight<small>queue many · own worktree each</small></button>
+      <button class="menu-item" data-mode="history">History<small>past runs &amp; verdicts</small></button>
     </div>
 
     <main>
@@ -239,6 +240,16 @@
                 <div id="p-log" class="log"></div>
               </div>
             </div>
+          </div>
+        </section>
+      </div>
+
+      <!-- =================== HISTORY =================== -->
+      <div id="mode-history" hidden>
+        <section class="history">
+          <div class="card grow">
+            <div class="card-title"><span>Run history</span><button id="history-clear" class="mini">clear</button></div>
+            <div id="history-list" class="history-list"><p class="muted">Completed runs appear here.</p></div>
           </div>
         </section>
       </div>
