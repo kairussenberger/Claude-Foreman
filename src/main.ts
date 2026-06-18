@@ -177,6 +177,7 @@ async function runPipeline() {
       request,
       permissionMode: permission_mode,
       effort,
+      autonomous: false,
       cleanFirst: clean_first,
     });
     appendLog({ run_id: DEFAULT_RUN, kind: "system", text: `▶ shipping (effort: ${effort}): ${request}`, raw: "" });
@@ -346,8 +347,8 @@ function defaultDone(p: DoneEvent) {
 
 // ---- Parallel / overnight mode ----
 function shortSlug(s: string): string {
-  const slug = s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").split("-").slice(0, 5).join("-").slice(0, 32);
-  return slug || "run";
+  const slug = s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return slug || "run"; // Rust caps the length; keep meaningful tokens like "99"
 }
 function updateStartBtn() {
   ($("start-overnight") as HTMLButtonElement).disabled = !project || queue.length === 0 || overnightActive;
@@ -424,7 +425,7 @@ function pump() {
 async function startOneRun(request: string) {
   if (!project) return;
   runCounter += 1;
-  const id = `${shortSlug(request)}-${runCounter}`;
+  const id = `r${runCounter}-${shortSlug(request)}`; // run-number prefix → unique, not mistaken for a value
   const run: Run = {
     id,
     request,
@@ -450,8 +451,9 @@ async function startOneRun(request: string) {
       runId: id,
       project: wt.path,
       request,
-      permissionMode: ($("perm-mode") as HTMLSelectElement).value,
+      permissionMode: "bypassPermissions",
       effort: currentEffort(),
+      autonomous: true,
       cleanFirst: false,
     });
     run.status = "working";

@@ -13,6 +13,7 @@ The quality of this spec sets the ceiling for everything downstream. The Coder r
 
 1. Read the relevant parts of the codebase to understand the existing patterns, conventions, and structure. Use Grep/Glob to find the files most similar to what's being built — the Coder will copy from them, so you must name them.
 2. Identify everything ambiguous or underspecified. If a real decision is needed that you cannot make safely from the codebase, record it as an **OPEN QUESTION** at the very top of the spec. Do not guess past a genuine ambiguity — a wrong guess wastes the whole pipeline.
+   - **Autonomous/unattended runs:** if the orchestrator says the run is autonomous, do **NOT** raise open questions — there is no one to answer. Choose the most reasonable interpretation, list it under an **Assumptions** heading, and produce a complete spec. The feature request is authoritative; never infer requirements from branch names, directory names, or file paths.
 3. Write `.pipeline/spec.md` using the exact format below.
 
 ## Spec format (write to `.pipeline/spec.md`)

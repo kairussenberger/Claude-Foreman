@@ -26,6 +26,7 @@ const CODER_MD: &str = include_str!("../templates/coder.md");
 const TESTER_MD: &str = include_str!("../templates/tester.md");
 const REVIEWER_MD: &str = include_str!("../templates/reviewer.md");
 const SHIP_MD: &str = include_str!("../templates/ship.md");
+const SHIP_AUTO_MD: &str = include_str!("../templates/ship-auto.md");
 
 struct Asset {
     rel: &'static str,
@@ -39,6 +40,7 @@ fn assets() -> Vec<Asset> {
         Asset { rel: ".claude/agents/tester.md", contents: TESTER_MD },
         Asset { rel: ".claude/agents/reviewer.md", contents: REVIEWER_MD },
         Asset { rel: ".claude/commands/ship.md", contents: SHIP_MD },
+        Asset { rel: ".claude/commands/ship-auto.md", contents: SHIP_AUTO_MD },
     ]
 }
 
@@ -579,6 +581,7 @@ fn run_pipeline(
     request: String,
     permission_mode: String,
     effort: String,
+    autonomous: bool,
     clean_first: bool,
 ) -> Result<(), String> {
     let root = PathBuf::from(&project);
@@ -595,7 +598,8 @@ fn run_pipeline(
 
     let claude = resolve_claude();
     let mode = valid_permission_mode(&permission_mode).to_string();
-    let prompt = format!("/ship {request}");
+    let command = if autonomous { "ship-auto" } else { "ship" };
+    let prompt = format!("/{command} {request}");
 
     let mut cmd = Command::new(&claude);
     cmd.current_dir(&root)
