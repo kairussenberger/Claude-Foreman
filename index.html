@@ -186,6 +186,12 @@
                 <button id="cancel-btn" disabled>■ Cancel</button>
               </div>
               <div id="verdict" class="verdict hidden"></div>
+              <div id="confirm-panel" class="confirm-panel hidden">
+                <span class="confirm-label">✓ Confirmation window — did I understand this right?</span>
+                <div id="confirm-body" class="confirm-body markdown"></div>
+                <textarea id="confirm-input" rows="2" placeholder="Looks right? Just confirm — or type any corrections…"></textarea>
+                <button id="confirm-send" class="primary">✓ Confirm &amp; continue</button>
+              </div>
               <div id="reply-panel" class="reply-panel hidden">
                 <span class="reply-label">⏸ Paused — the pipeline asked a question. Reply to continue:</span>
                 <textarea id="reply-input" rows="2" placeholder="your answer…"></textarea>

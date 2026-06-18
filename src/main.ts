@@ -104,6 +104,7 @@ let defaultSessionId: string | null = null; // for resuming a paused default-mod
 let defaultRequest = "";
 let defaultRunTokens = 0;
 let autoFixRemaining = 0;
+let awaitingConfirmation = false; // first pause of a default run is the Planner's confirmation
 let history: HistoryEntry[] = JSON.parse(localStorage.getItem("foreman.history") || "[]");
 let profiles: Record<string, { effort: string; perm: string }> = JSON.parse(localStorage.getItem("foreman.profiles") || "{}");
 let editingAgent: string | null = null;
@@ -275,10 +276,12 @@ async function runPipeline() {
   resetStages();
   hideVerdict();
   hideReply();
+  hideConfirm();
   resetRunUsage();
   defaultSessionId = null;
   defaultRequest = request;
   defaultRunTokens = 0;
+  awaitingConfirmation = true;
   autoFixRemaining = ($("autofix") as HTMLInputElement).checked
     ? Math.max(1, Math.min(3, Number(($("autofix-passes") as HTMLInputElement).value) || 1))
     : 0;
@@ -454,19 +457,26 @@ function defaultStage(p: StageEvent) {
 function defaultDone(p: DoneEvent) {
   setRunning(false);
   const verdict = classifyVerdict(p.verdict);
+  showVerdict(p.verdict);
+  refreshStatus();
+  if (!verdict && defaultSessionId) {
+    // A pause for input (not a terminal stop) — leave the crew as-is; it resumes on reply.
+    if (awaitingConfirmation) {
+      awaitingConfirmation = false;
+      void showConfirm();
+      notify("Foreman — confirm understanding", "The Planner restated the task. Confirm or correct to continue.");
+    } else {
+      showReply();
+      notify("Foreman — needs your input", "The pipeline paused with a question. Reply in the app to continue.");
+    }
+    return;
+  }
+  // Terminal: mark any still-running stage as stopped.
   document.querySelectorAll<HTMLElement>("#mode-default .agent.running").forEach((el) => {
     el.classList.remove("running");
     el.classList.add("blocked");
     el.querySelector(".agent-state")!.textContent = "stopped";
   });
-  showVerdict(p.verdict);
-  refreshStatus();
-  if (!verdict && defaultSessionId) {
-    // Paused with a question rather than a verdict — let the human answer and resume.
-    showReply();
-    notify("Foreman — needs your input", "The pipeline paused with a question. Reply in the app to continue.");
-    return;
-  }
   if (verdict && verdict !== "ship" && autoFixRemaining > 0 && defaultSessionId) {
     autoFixRemaining -= 1;
     runAutoFix(p.verdict);
@@ -580,6 +590,46 @@ async function replyContinue() {
     appendLog({ run_id: DEFAULT_RUN, kind: "stderr", text: `reply error: ${e}`, raw: "" });
     setRunning(false);
   }
+}
+
+// Confirmation window: the Planner's restated understanding + assumptions, before any work.
+async function showConfirm() {
+  $("confirm-body").innerHTML = `<p class="muted">loading…</p>`;
+  $("confirm-panel").classList.remove("hidden");
+  try {
+    const md = await invoke<string>("read_handoff", { project, name: "confirm.md" });
+    $("confirm-body").innerHTML = await marked.parse(md);
+  } catch {
+    $("confirm-body").innerHTML = `<p>The Planner wants to confirm its understanding before building. Confirm or correct to continue.</p>`;
+  }
+  ($("confirm-input") as HTMLTextAreaElement).focus();
+}
+function hideConfirm() {
+  $("confirm-panel").classList.add("hidden");
+}
+async function confirmContinue() {
+  if (!project || !defaultSessionId || running) return;
+  const ta = $("confirm-input") as HTMLTextAreaElement;
+  const answer = ta.value.trim() || "Confirmed — your understanding is correct. Proceed.";
+  ta.value = "";
+  hideConfirm();
+  hideVerdict();
+  setRunning(true);
+  resetRunUsage();
+  appendLog({ run_id: DEFAULT_RUN, kind: "system", text: `✓ confirmed: ${answer}`, raw: "" });
+  invoke("run_pipeline", {
+    runId: DEFAULT_RUN,
+    project,
+    request: answer,
+    permissionMode: ($("perm-mode") as HTMLSelectElement).value,
+    effort: currentEffort(),
+    autonomous: false,
+    resume: defaultSessionId,
+    cleanFirst: false,
+  }).catch((e) => {
+    appendLog({ run_id: DEFAULT_RUN, kind: "stderr", text: `confirm error: ${e}`, raw: "" });
+    setRunning(false);
+  });
 }
 
 // ---- Parallel / overnight mode ----
@@ -976,6 +1026,7 @@ $("run-btn").addEventListener("click", runPipeline);
 $("cancel-btn").addEventListener("click", cancel);
 $("clear-log").addEventListener("click", () => ($("log").innerHTML = ""));
 $("reply-send").addEventListener("click", replyContinue);
+$("confirm-send").addEventListener("click", confirmContinue);
 $("open-finder").addEventListener("click", () => {
   if (project) revealItemInDir(project).catch(() => {});
 });
