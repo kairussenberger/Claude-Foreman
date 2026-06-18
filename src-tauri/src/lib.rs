@@ -48,6 +48,12 @@ const STAGES: [(&str, &str); 4] = [
     ("reviewer", "review.md"),
 ];
 
+const AGENTS: [&str; 4] = ["planner", "coder", "tester", "reviewer"];
+
+// Models offered in the per-agent picker. Aliases resolve to the latest version;
+// `inherit` means "use the session model". Full ids (claude-opus-4-8, …) also work.
+const ALLOWED_MODELS: [&str; 5] = ["opus", "sonnet", "haiku", "fable", "inherit"];
+
 // --- Shared state: the currently running child process, so we can cancel it. ---
 
 #[derive(Default)]
@@ -78,10 +84,16 @@ struct HandoffFile {
 }
 
 #[derive(Serialize)]
+struct AgentInfo {
+    name: String,
+    present: bool,
+    model: Option<String>,
+}
+
+#[derive(Serialize)]
 struct PipelineStatus {
     initialized: bool,
-    agents_present: Vec<String>,
-    agents_missing: Vec<String>,
+    agents: Vec<AgentInfo>,
     has_ship_command: bool,
     handoffs: Vec<HandoffFile>,
 }
@@ -103,6 +115,16 @@ struct StageEvent {
 struct DoneEvent {
     code: Option<i32>,
     verdict: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+struct UsageEvent {
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read: u64,
+    cache_creation: u64,
+    cost_usd: Option<f64>,
+    is_final: bool,
 }
 
 // --- Helpers ---
@@ -136,6 +158,38 @@ fn valid_permission_mode(mode: &str) -> &str {
         "default" | "acceptEdits" | "plan" | "bypassPermissions" => mode,
         _ => "acceptEdits",
     }
+}
+
+fn valid_effort(e: &str) -> Option<&str> {
+    match e {
+        "low" | "medium" | "high" | "xhigh" | "max" => Some(e),
+        _ => None,
+    }
+}
+
+/// Read the `model:` value from an agent file's YAML frontmatter, if present.
+fn read_agent_model(path: &Path) -> Option<String> {
+    let txt = fs::read_to_string(path).ok()?;
+    let mut in_fm = false;
+    for line in txt.lines() {
+        let t = line.trim();
+        if t == "---" {
+            if in_fm {
+                break;
+            }
+            in_fm = true;
+            continue;
+        }
+        if in_fm {
+            if let Some(rest) = t.strip_prefix("model:") {
+                let v = rest.trim();
+                if !v.is_empty() {
+                    return Some(v.to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Turn one stream-json line into a (kind, human summary) pair for the log pane.
@@ -248,15 +302,19 @@ fn init_pipeline(project: String, force: bool) -> Result<InitResult, String> {
 #[tauri::command]
 fn pipeline_status(project: String) -> Result<PipelineStatus, String> {
     let root = PathBuf::from(&project);
-    let mut present = Vec::new();
-    let mut missing = Vec::new();
-    for agent in ["planner", "coder", "tester", "reviewer"] {
+    let mut agents = Vec::new();
+    let mut all_present = true;
+    for agent in AGENTS {
         let p = root.join(format!(".claude/agents/{agent}.md"));
-        if p.exists() {
-            present.push(agent.to_string());
-        } else {
-            missing.push(agent.to_string());
+        let present = p.exists();
+        if !present {
+            all_present = false;
         }
+        agents.push(AgentInfo {
+            name: agent.to_string(),
+            present,
+            model: if present { read_agent_model(&p) } else { None },
+        });
     }
     let has_ship_command = root.join(".claude/commands/ship.md").exists();
     let handoffs = STAGES
@@ -277,12 +335,49 @@ fn pipeline_status(project: String) -> Result<PipelineStatus, String> {
         })
         .collect();
     Ok(PipelineStatus {
-        initialized: missing.is_empty() && has_ship_command,
-        agents_present: present,
-        agents_missing: missing,
+        initialized: all_present && has_ship_command,
+        agents,
         has_ship_command,
         handoffs,
     })
+}
+
+/// (2) Set the model for one agent by rewriting its frontmatter `model:` line.
+#[tauri::command]
+fn set_agent_model(project: String, agent: String, model: String) -> Result<(), String> {
+    if !AGENTS.contains(&agent.as_str()) {
+        return Err(format!("unknown agent: {agent}"));
+    }
+    if !ALLOWED_MODELS.contains(&model.as_str()) {
+        return Err(format!("unsupported model: {model}"));
+    }
+    let path = PathBuf::from(&project).join(format!(".claude/agents/{agent}.md"));
+    let txt = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let mut out: Vec<String> = Vec::new();
+    let mut in_fm = false;
+    let mut replaced = false;
+    for line in txt.lines() {
+        let t = line.trim();
+        if t == "---" {
+            in_fm = !in_fm;
+            out.push(line.to_string());
+            continue;
+        }
+        if in_fm && !replaced && t.starts_with("model:") {
+            out.push(format!("model: {model}"));
+            replaced = true;
+        } else {
+            out.push(line.to_string());
+        }
+    }
+    if !replaced {
+        return Err("no `model:` field in agent frontmatter".into());
+    }
+    let mut content = out.join("\n");
+    if txt.ends_with('\n') {
+        content.push('\n');
+    }
+    fs::write(&path, content).map_err(|e| e.to_string())
 }
 
 /// (2) Read one handoff file's contents for the viewer. Path-traversal guarded.
@@ -321,6 +416,7 @@ fn run_pipeline(
     project: String,
     request: String,
     permission_mode: String,
+    effort: String,
     clean_first: bool,
 ) -> Result<(), String> {
     let root = PathBuf::from(&project);
@@ -339,8 +435,8 @@ fn run_pipeline(
     let mode = valid_permission_mode(&permission_mode).to_string();
     let prompt = format!("/ship {request}");
 
-    let mut child = Command::new(&claude)
-        .current_dir(&root)
+    let mut cmd = Command::new(&claude);
+    cmd.current_dir(&root)
         .arg("-p")
         .arg(&prompt)
         .arg("--output-format")
@@ -350,17 +446,69 @@ fn run_pipeline(
         .arg(&mode)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(level) = valid_effort(&effort) {
+        cmd.arg("--effort").arg(level);
+    }
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("failed to launch claude ({claude}): {e}"))?;
 
-    // Reader: stdout (stream-json events).
+    // Reader: stdout (stream-json events) — also tallies token usage.
     if let Some(stdout) = child.stdout.take() {
         let app = app.clone();
         thread::spawn(move || {
+            let (mut it, mut ot, mut cr, mut cc) = (0u64, 0u64, 0u64, 0u64);
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 if line.trim().is_empty() {
                     continue;
+                }
+                if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                    match v.get("type").and_then(|x| x.as_str()).unwrap_or("") {
+                        // Authoritative cumulative totals for the whole run (incl. subagents).
+                        "result" => {
+                            let u = v.get("usage");
+                            let field = |k: &str| {
+                                u.and_then(|u| u.get(k))
+                                    .or_else(|| v.get(k))
+                                    .and_then(|x| x.as_u64())
+                                    .unwrap_or(0)
+                            };
+                            let _ = app.emit(
+                                "pipeline-usage",
+                                UsageEvent {
+                                    input_tokens: field("input_tokens"),
+                                    output_tokens: field("output_tokens"),
+                                    cache_read: field("cache_read_input_tokens"),
+                                    cache_creation: field("cache_creation_input_tokens"),
+                                    cost_usd: v.get("total_cost_usd").and_then(|x| x.as_f64()),
+                                    is_final: true,
+                                },
+                            );
+                        }
+                        // Live running tally from each assistant turn (approximate).
+                        "assistant" => {
+                            if let Some(u) = v.pointer("/message/usage") {
+                                let field = |k: &str| u.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+                                it += field("input_tokens");
+                                ot += field("output_tokens");
+                                cr += field("cache_read_input_tokens");
+                                cc += field("cache_creation_input_tokens");
+                                let _ = app.emit(
+                                    "pipeline-usage",
+                                    UsageEvent {
+                                        input_tokens: it,
+                                        output_tokens: ot,
+                                        cache_read: cr,
+                                        cache_creation: cc,
+                                        cost_usd: None,
+                                        is_final: false,
+                                    },
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
                 }
                 let (kind, text) = classify(&line);
                 let _ = app.emit("pipeline-log", LogEvent { kind, text, raw: line });
@@ -466,6 +614,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             init_pipeline,
             pipeline_status,
+            set_agent_model,
             read_handoff,
             clean_pipeline,
             run_pipeline,

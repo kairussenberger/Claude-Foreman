@@ -13,16 +13,24 @@ import { marked } from "marked";
 type FileResult = { path: string; action: string };
 type InitResult = { project: string; files: FileResult[] };
 type HandoffFile = { name: string; exists: boolean; size: number; modified_ms: number | null };
+type AgentInfo = { name: string; present: boolean; model: string | null };
 type PipelineStatus = {
   initialized: boolean;
-  agents_present: string[];
-  agents_missing: string[];
+  agents: AgentInfo[];
   has_ship_command: boolean;
   handoffs: HandoffFile[];
 };
 type LogEvent = { kind: string; text: string; raw: string };
 type StageEvent = { agent: string; file: string };
 type DoneEvent = { code: number | null; verdict: string | null };
+type UsageEvent = {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read: number;
+  cache_creation: number;
+  cost_usd: number | null;
+  is_final: boolean;
+};
 
 const STAGE_ORDER = ["planner", "coder", "tester", "reviewer"];
 const HANDOFF_FOR: Record<string, string> = {
@@ -31,12 +39,15 @@ const HANDOFF_FOR: Record<string, string> = {
   tester: "test-results.md",
   reviewer: "review.md",
 };
+const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
 let project: string | null = localStorage.getItem("foreman.project");
 let running = false;
 let activeFile: string | null = null;
+let sessionCost = Number(localStorage.getItem("foreman.sessionCost") || "0");
+let sessionTokens = Number(localStorage.getItem("foreman.sessionTokens") || "0");
 
 // ---- Project selection ----
 async function chooseProject() {
@@ -68,12 +79,19 @@ async function refreshStatus() {
 function renderStatus(status: PipelineStatus) {
   const grid = $("status-grid");
   grid.innerHTML = "";
-  for (const agent of STAGE_ORDER) {
-    const present = status.agents_present.includes(agent);
+  for (const a of status.agents) {
     const chip = document.createElement("span");
-    chip.className = `chip ${present ? "ok" : "miss"}`;
-    chip.textContent = `${present ? "✓" : "○"} ${agent}`;
+    chip.className = `chip ${a.present ? "ok" : "miss"}`;
+    chip.textContent = `${a.present ? "✓" : "○"} ${a.name}`;
     grid.appendChild(chip);
+
+    // Reflect the agent's current model in its crew dropdown.
+    const sel = document.querySelector<HTMLSelectElement>(`.model-select[data-agent="${a.name}"]`);
+    if (sel) {
+      sel.disabled = !a.present || running;
+      const v = (a.model || "").toLowerCase();
+      if (v && Array.from(sel.options).some((o) => o.value === v)) sel.value = v;
+    }
   }
   const cmd = document.createElement("span");
   cmd.className = `chip ${status.has_ship_command ? "ok" : "miss"}`;
@@ -112,16 +130,24 @@ async function runPipeline() {
   }
   const permission_mode = ($("perm-mode") as HTMLSelectElement).value;
   const clean_first = ($("clean-first") as HTMLInputElement).checked;
+  const effort = currentEffort();
 
   resetStages();
   hideVerdict();
+  resetRunUsage();
   if (clean_first) $("log").innerHTML = "";
   setRunning(true);
   setStageState("planner", "running");
 
   try {
-    await invoke("run_pipeline", { project, request, permissionMode: permission_mode, cleanFirst: clean_first });
-    appendLog({ kind: "system", text: `▶ shipping: ${request}`, raw: "" });
+    await invoke("run_pipeline", {
+      project,
+      request,
+      permissionMode: permission_mode,
+      effort,
+      cleanFirst: clean_first,
+    });
+    appendLog({ kind: "system", text: `▶ shipping (effort: ${effort}): ${request}`, raw: "" });
   } catch (e) {
     appendLog({ kind: "stderr", text: `run error: ${e}`, raw: "" });
     setRunning(false);
@@ -143,6 +169,9 @@ function setRunning(state: boolean) {
   ($("run-btn") as HTMLButtonElement).disabled = state || !project;
   ($("cancel-btn") as HTMLButtonElement).disabled = !state;
   ($("choose-project") as HTMLButtonElement).disabled = state;
+  document.querySelectorAll<HTMLSelectElement>(".model-select").forEach((s) => {
+    if (state) s.disabled = true;
+  });
 }
 
 // ---- Stages ----
@@ -237,8 +266,46 @@ function hideVerdict() {
   $("verdict").className = "verdict hidden";
 }
 
+// ---- Effort (global) ----
+function currentEffort(): string {
+  const idx = Number(($("effort") as HTMLInputElement).value) - 1;
+  return EFFORT_LEVELS[Math.max(0, Math.min(EFFORT_LEVELS.length - 1, idx))];
+}
+function updateEffortLabel() {
+  $("effort-label").textContent = currentEffort();
+  localStorage.setItem("foreman.effort", ($("effort") as HTMLInputElement).value);
+}
+
+// ---- Usage / tokens ----
+function fmtTokens(n: number): string {
+  return n.toLocaleString("en-US");
+}
+function resetRunUsage() {
+  $("usage-run").textContent = "running…";
+  $("usage-cost").textContent = "—";
+}
+function renderUsage(u: UsageEvent) {
+  if (u.is_final) {
+    // Authoritative cumulative totals for the whole run (incl. subagents).
+    $("usage-run").textContent = `${fmtTokens(u.input_tokens)} in · ${fmtTokens(u.output_tokens)} out`;
+    $("usage-cost").textContent = u.cost_usd != null ? `$${u.cost_usd.toFixed(4)}` : "—";
+    sessionTokens += u.input_tokens + u.output_tokens;
+    if (u.cost_usd != null) sessionCost += u.cost_usd;
+    localStorage.setItem("foreman.sessionTokens", String(sessionTokens));
+    localStorage.setItem("foreman.sessionCost", String(sessionCost));
+    renderSession();
+  } else {
+    // Live progress: input per turn re-counts context, so only output is meaningful.
+    $("usage-run").textContent = `${fmtTokens(u.output_tokens)} out (so far)`;
+  }
+}
+function renderSession() {
+  $("usage-session").textContent = `$${sessionCost.toFixed(4)} · ${fmtTokens(sessionTokens)} tok`;
+}
+
 // ---- Event wiring ----
 listen<LogEvent>("pipeline-log", (e) => appendLog(e.payload));
+listen<UsageEvent>("pipeline-usage", (e) => renderUsage(e.payload));
 
 listen<StageEvent>("pipeline-stage", (e) => {
   const { agent } = e.payload;
@@ -276,6 +343,25 @@ $("clear-log").addEventListener("click", () => ($("log").innerHTML = ""));
 $("open-finder").addEventListener("click", () => {
   if (project) revealItemInDir(project).catch(() => {});
 });
+$("effort").addEventListener("input", updateEffortLabel);
+document.querySelectorAll<HTMLSelectElement>(".model-select").forEach((sel) => {
+  sel.addEventListener("change", async () => {
+    if (!project) return;
+    const agent = sel.dataset.agent!;
+    try {
+      await invoke("set_agent_model", { project, agent, model: sel.value });
+      appendLog({ kind: "system", text: `${agent} → ${sel.value}`, raw: "" });
+    } catch (err) {
+      appendLog({ kind: "stderr", text: `set model error: ${err}`, raw: "" });
+      refreshStatus(); // revert dropdown to the file's actual value
+    }
+  });
+});
+
+const savedEffort = localStorage.getItem("foreman.effort");
+if (savedEffort) ($("effort") as HTMLInputElement).value = savedEffort;
+updateEffortLabel();
+renderSession();
 
 if (project) {
   setProject(project);

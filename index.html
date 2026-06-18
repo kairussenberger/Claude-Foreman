@@ -36,7 +36,12 @@
               <rect x="18" y="10" width="24" height="8" rx="2" fill="#5a3d2b" />
             </svg>
           </div>
-          <div class="agent-meta"><span class="agent-name">Planner</span><span class="agent-model">opus</span></div>
+          <div class="agent-meta">
+            <span class="agent-name">Planner</span>
+            <select class="model-select" data-agent="planner" title="Model" disabled>
+              <option value="opus">Opus</option><option value="sonnet">Sonnet</option><option value="haiku">Haiku</option><option value="fable">Fable</option><option value="inherit">Inherit</option>
+            </select>
+          </div>
           <span class="agent-state">idle</span>
         </div>
 
@@ -57,7 +62,12 @@
               <rect x="18" y="9" width="24" height="10" rx="6" fill="#5a3d2b" />
             </svg>
           </div>
-          <div class="agent-meta"><span class="agent-name">Coder</span><span class="agent-model">sonnet</span></div>
+          <div class="agent-meta">
+            <span class="agent-name">Coder</span>
+            <select class="model-select" data-agent="coder" title="Model" disabled>
+              <option value="opus">Opus</option><option value="sonnet">Sonnet</option><option value="haiku">Haiku</option><option value="fable">Fable</option><option value="inherit">Inherit</option>
+            </select>
+          </div>
           <span class="agent-state">idle</span>
         </div>
 
@@ -78,7 +88,12 @@
               <rect x="18" y="10" width="24" height="8" rx="2" fill="#ddc36a" />
             </svg>
           </div>
-          <div class="agent-meta"><span class="agent-name">Tester</span><span class="agent-model">sonnet</span></div>
+          <div class="agent-meta">
+            <span class="agent-name">Tester</span>
+            <select class="model-select" data-agent="tester" title="Model" disabled>
+              <option value="opus">Opus</option><option value="sonnet">Sonnet</option><option value="haiku">Haiku</option><option value="fable">Fable</option><option value="inherit">Inherit</option>
+            </select>
+          </div>
           <span class="agent-state">idle</span>
         </div>
 
@@ -100,7 +115,12 @@
               <rect x="20" y="7" width="20" height="11" rx="8" fill="#2b2b2b" />
             </svg>
           </div>
-          <div class="agent-meta"><span class="agent-name">Reviewer</span><span class="agent-model">opus</span></div>
+          <div class="agent-meta">
+            <span class="agent-name">Reviewer</span>
+            <select class="model-select" data-agent="reviewer" title="Model" disabled>
+              <option value="opus">Opus</option><option value="sonnet">Sonnet</option><option value="haiku">Haiku</option><option value="fable">Fable</option><option value="inherit">Inherit</option>
+            </select>
+          </div>
           <span class="agent-state">idle</span>
         </div>
       </section>
@@ -135,11 +155,26 @@
               <label class="checkbox"><input type="checkbox" id="clean-first" checked /> clean .pipeline first</label>
             </div>
             <div class="row">
+              <label class="field" style="flex: 1 1 auto">
+                <span>Effort: <strong id="effort-label">high</strong> <span class="muted">(all agents)</span></span>
+                <input type="range" id="effort" min="1" max="5" step="1" value="3" />
+              </label>
+            </div>
+            <div class="row">
               <button id="run-btn" class="primary" disabled>▶ Ship</button>
               <button id="cancel-btn" disabled>■ Cancel</button>
             </div>
             <div id="verdict" class="verdict hidden"></div>
             <p class="hint">Tip: run on a throwaway branch or git worktree. Foreman never merges — it leaves the diff for you.</p>
+          </div>
+
+          <div class="card usage-card">
+            <div class="card-title">Usage</div>
+            <div class="usage-grid">
+              <span class="u-label">This run</span><span id="usage-run" class="u-val">—</span>
+              <span class="u-label">Cost</span><span id="usage-cost" class="u-val">—</span>
+              <span class="u-label">Session</span><span id="usage-session" class="u-val">$0.0000 · 0 tok</span>
+            </div>
           </div>
         </div>
 

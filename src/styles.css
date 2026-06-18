@@ -267,3 +267,32 @@ textarea:focus, select:focus { outline: none; border-color: var(--accent); box-s
 .log .result .k { color: var(--green); }
 .log .stderr { color: var(--red); }
 .log .system .k { color: var(--amber); }
+
+/* Per-agent model dropdown (in the crew panels) */
+.model-select {
+  width: auto;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  padding: 1px 5px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--muted);
+  cursor: pointer;
+}
+.model-select:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
+.model-select:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Effort slider */
+#effort { width: 100%; accent-color: var(--accent); cursor: pointer; margin-top: 4px; }
+#effort-label { text-transform: capitalize; color: var(--accent); }
+
+/* Usage card */
+.usage-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 5px 12px;
+  align-items: baseline;
+}
+.usage-grid .u-label { color: var(--muted); font-size: 11px; }
+.usage-grid .u-val { font-family: var(--mono); font-size: 12px; text-align: right; }
