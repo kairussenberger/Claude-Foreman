@@ -32,6 +32,7 @@ Then open Foreman → **Choose repo** → **Install agents into repo** → type 
 6. [How it works](#6-how-it-works)
 7. [Repo layout](#7-repo-layout)
 8. [Notes & caveats](#8-notes--caveats)
+9. [Porting to Windows](#9-porting-to-windows)
 
 ---
 
@@ -149,3 +150,16 @@ docs/crew.png                  the hero image
 - **It never merges.** Every run leaves its diff (and, for overnight runs, its branch) for you to review. Only the Shipper takes outward action, and only when you tell it to.
 - **Overnight runs are autonomous** and use `bypassPermissions` inside isolated worktrees, so they can run tests/builds without prompting. The **Shipper** also runs with full permissions by design — it's meant to act — so it can `git push` / open PRs the moment you ask.
 - **Unsigned build.** It's a local Tauri build; there's no Apple notarization. Right-click → Open on first launch if macOS objects.
+
+## 9. Porting to Windows
+
+Foreman is built on Tauri, so the app shell, the **entire frontend**, the tray, notifications, dialogs, multi-window, git/worktrees, and the pipeline engine are already cross-platform — a Windows build is mostly swapping a few macOS-specific bits. Recommended path:
+
+1. **Resolve `claude` on Windows.** The only OS-bound code is `resolve_claude` / `which_login` / `newest_nvm_claude` in `src-tauri/src/lib.rs` (~lines 178–240), which hardcodes Unix (`/bin/zsh -ilc`, `~/.nvm`, `/opt/homebrew`, `$HOME`). Add a `#[cfg(target_os = "windows")]` branch that uses `%USERPROFILE%`, `where claude`, and common npm / nvm-windows locations (e.g. `%APPDATA%\npm\claude.cmd`).
+2. **Spawn the `.cmd`.** On Windows `claude` is usually `claude.cmd`, which Rust's `Command::new` can't launch directly — invoke it as `cmd /c claude …`. The rest of `run_pipeline` / `ship_agent` is unchanged; `git` works as-is.
+3. **Scripts.** `scripts/*.sh` are macOS-only (zsh / AppleScript / `/Applications`). Add an `install.ps1` (`npm install` → `npm run tauri build` → run the produced `.msi`/`.exe`); the self-updating launcher is optional.
+4. **Build & ship.** You can't cleanly cross-compile from macOS — build on Windows (Rust MSVC toolchain + Node + WebView2; `npm run tauri build` emits an `.msi`/`.exe`), or add a **GitHub Actions matrix** using [`tauri-apps/tauri-action`](https://github.com/tauri-apps/tauri-action) to produce macOS + Windows installers on every tag. The CI route is the cleanest if you don't have a Windows machine handy.
+
+**Verify first:** confirm Claude Code's Windows CLI behaves the same headless — `claude -p --output-format stream-json --verbose --permission-mode <m> --effort <e> --resume <id>`, slash commands, and subagents. That parity is the one thing outside Foreman's control.
+
+That's the whole surface — point an agent at this repo and it can take it from here.
