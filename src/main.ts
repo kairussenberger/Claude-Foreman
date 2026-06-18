@@ -150,13 +150,13 @@ function resetStages() {
   for (const agent of STAGE_ORDER) setStageState(agent, "idle");
 }
 function setStageState(agent: string, state: "idle" | "running" | "done" | "blocked") {
-  const li = document.querySelector<HTMLLIElement>(`.stages li[data-agent="${agent}"]`);
-  if (!li) return;
-  li.classList.remove("running", "done", "blocked");
-  if (state !== "idle") li.classList.add(state);
+  const el = document.querySelector<HTMLElement>(`.agent[data-agent="${agent}"]`);
+  if (!el) return;
+  el.classList.remove("running", "done", "blocked");
+  if (state !== "idle") el.classList.add(state);
   const label =
     state === "idle" ? "idle" : state === "running" ? "working…" : state === "done" ? "done ✓" : "stopped";
-  li.querySelector(".state")!.textContent = label;
+  el.querySelector(".agent-state")!.textContent = label;
 }
 
 // ---- File viewer ----
@@ -253,10 +253,10 @@ listen<DoneEvent>("pipeline-done", async (e) => {
   setRunning(false);
   const { verdict } = e.payload;
   // Any stage still "working" but with no handoff means the pipeline stopped early.
-  document.querySelectorAll<HTMLLIElement>(".stages li.running").forEach((li) => {
-    li.classList.remove("running");
-    li.classList.add("blocked");
-    li.querySelector(".state")!.textContent = "stopped";
+  document.querySelectorAll<HTMLElement>(".agent.running").forEach((el) => {
+    el.classList.remove("running");
+    el.classList.add("blocked");
+    el.querySelector(".agent-state")!.textContent = "stopped";
   });
   showVerdict(verdict);
   await refreshStatus();
