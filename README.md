@@ -8,6 +8,8 @@
 
 > Foreman drives the `claude` CLI you already use. It runs on your **Claude subscription** — no API key, no extra billing — and **never merges anything**: it leaves the diff for you.
 
+> **Deep dive:** [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — engine, Rust commands, events, file structure, and the roadmap.
+
 ---
 
 ## Quick start
