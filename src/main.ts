@@ -124,6 +124,7 @@ let profiles: Record<string, { effort: string; perm: string }> = JSON.parse(loca
 let editingAgent: string | null = null;
 let currentSkill: string | null = null;
 let pendingSkillDelete: string | null = null;
+let skillBuilding = false;
 
 // Parallel-mode state
 const queue: string[] = [];
@@ -987,6 +988,7 @@ function renderHistory() {
 
 // ---- Skills (native Claude Code skills under .claude/skills/) ----
 async function renderSkills() {
+  setSkillBuildRunning(skillBuilding);
   const list = $("skills-list");
   if (!project) {
     list.innerHTML = `<p class="muted">Select a repo to see its skills.</p>`;
@@ -1027,10 +1029,11 @@ async function renderSkills() {
     list.innerHTML = `<p class="muted">skills error: ${e}</p>`;
   }
 }
-function setSkillStatus(msg: string, isError = false) {
+function setSkillStatus(msg: string, level: "ok" | "warn" | "err" = "ok") {
   const el = $("skill-status");
   el.textContent = msg;
-  el.classList.toggle("err", isError);
+  el.classList.toggle("err", level === "err");
+  el.classList.toggle("warn", level === "warn");
 }
 async function openSkill(name: string) {
   if (!project) return;
@@ -1044,17 +1047,37 @@ async function openSkill(name: string) {
     setSkillStatus("");
     renderSkills();
   } catch (e) {
-    setSkillStatus(`open failed: ${e}`, true);
+    setSkillStatus(`open failed: ${e}`, "err");
   }
+}
+// The description shipped by the create template — saving with it still in place means a
+// skill that loads but never triggers, so flag it (plus other common frontmatter slips).
+const PLACEHOLDER_DESC_PREFIX = "What this skill does and WHEN Claude should use it";
+function lintSkill(folder: string, content: string): string | null {
+  const fm = content.match(/^---\s*\n([\s\S]*?)\n---/);
+  if (!fm) return "no valid --- frontmatter; Claude won't load this skill";
+  const nameLine = fm[1].match(/^name:[ \t]*(.*)$/m);
+  const descLine = fm[1].match(/^description:[ \t]*(.*)$/m);
+  if (!nameLine || !nameLine[1].trim()) return "missing 'name:' in frontmatter";
+  if (!descLine) return "missing 'description:' in frontmatter";
+  const name = nameLine[1].trim();
+  const desc = descLine[1].trim();
+  if (!desc) return "'description:' is empty — it's the trigger Claude reads; fill it in";
+  if (desc.startsWith(PLACEHOLDER_DESC_PREFIX)) return "description is still the placeholder; it won't trigger";
+  if (name !== folder) return `frontmatter name '${name}' ≠ folder '${folder}' — keep them the same`;
+  if (!/^[a-z0-9-]+$/.test(name)) return `name '${name}' should be lowercase letters, numbers, hyphens`;
+  return null;
 }
 async function saveSkill() {
   if (!project || !currentSkill) return;
+  const content = ($("skill-text") as HTMLTextAreaElement).value;
   try {
-    await invoke("write_skill", { project, name: currentSkill, content: ($("skill-text") as HTMLTextAreaElement).value });
-    setSkillStatus(`saved ${currentSkill}`);
+    await invoke("write_skill", { project, name: currentSkill, content });
+    const warn = lintSkill(currentSkill, content);
+    setSkillStatus(warn ? `saved — ⚠ ${warn}` : `saved ${currentSkill}`, warn ? "warn" : "ok");
     renderSkills();
   } catch (e) {
-    setSkillStatus(`save failed: ${e}`, true);
+    setSkillStatus(`save failed: ${e}`, "err");
   }
 }
 function startNewSkill() {
@@ -1071,13 +1094,13 @@ function cancelNewSkill() {
 }
 async function submitNewSkill() {
   if (!project) {
-    setSkillStatus("select a repo first", true);
+    setSkillStatus("select a repo first", "err");
     return;
   }
   const inp = $("skill-new-name") as HTMLInputElement;
   const name = inp.value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
   if (!name) {
-    setSkillStatus("type a skill name", true);
+    setSkillStatus("type a skill name", "err");
     inp.focus();
     return;
   }
@@ -1088,7 +1111,7 @@ async function submitNewSkill() {
     await renderSkills();
     openSkill(name);
   } catch (e) {
-    setSkillStatus(`create failed: ${e}`, true);
+    setSkillStatus(`create failed: ${e}`, "err");
   }
 }
 async function deleteSkill(name: string) {
@@ -1111,8 +1134,40 @@ async function deleteSkill(name: string) {
     setSkillStatus(`deleted ${name}`);
     renderSkills();
   } catch (e) {
-    setSkillStatus(`delete failed: ${e}`, true);
+    setSkillStatus(`delete failed: ${e}`, "err");
   }
+}
+
+// Skill Builder — a promptable agent that authors a full skill folder into .claude/skills/.
+function setSkillBuildRunning(on: boolean) {
+  skillBuilding = on;
+  ($("skillbuild-run") as HTMLButtonElement).disabled = on || !project;
+  ($("skillbuild-cancel") as HTMLButtonElement).disabled = !on;
+}
+async function buildSkill() {
+  if (!project || skillBuilding) return;
+  const ta = $("skillbuild-input") as HTMLTextAreaElement;
+  const prompt = ta.value.trim();
+  if (!prompt) {
+    ta.focus();
+    return;
+  }
+  setSkillBuildRunning(true);
+  $("skillbuild-state").textContent = "building…";
+  $("skillbuild-state").classList.remove("err", "warn");
+  writeLogLine($("skillbuild-log"), "system", `▶ ${prompt}`);
+  try {
+    await invoke("build_skill", { project, prompt });
+    ta.value = "";
+  } catch (e) {
+    writeLogLine($("skillbuild-log"), "stderr", `build error: ${e}`);
+    setSkillBuildRunning(false);
+    $("skillbuild-state").textContent = "";
+  }
+}
+async function cancelSkillBuild() {
+  await invoke("cancel_run", { runId: "skill-builder" }).catch(() => {});
+  writeLogLine($("skillbuild-log"), "system", "■ cancelled");
 }
 
 // ---- Mode switching ----
@@ -1168,6 +1223,13 @@ listen<SessionEvent>("pipeline-session", (e) => {
     defaultSessionId = e.payload.session_id;
     updateRerunButtons();
   }
+});
+listen<{ kind: string; text: string }>("skillbuild-log", (e) => writeLogLine($("skillbuild-log"), e.payload.kind, e.payload.text));
+listen("skillbuild-done", () => {
+  setSkillBuildRunning(false);
+  $("skillbuild-state").textContent = "done ✓";
+  writeLogLine($("skillbuild-log"), "system", "✓ skill builder finished");
+  renderSkills(); // the new skill now shows up in the list
 });
 
 // ---- Boot ----
@@ -1234,6 +1296,8 @@ $("history-clear").addEventListener("click", () => {
 $("skill-new").addEventListener("click", startNewSkill);
 $("skill-create").addEventListener("click", submitNewSkill);
 $("skill-save").addEventListener("click", saveSkill);
+$("skillbuild-run").addEventListener("click", buildSkill);
+$("skillbuild-cancel").addEventListener("click", cancelSkillBuild);
 ($("skill-new-name") as HTMLInputElement).addEventListener("keydown", (e) => {
   if (e.key === "Enter") {
     e.preventDefault();

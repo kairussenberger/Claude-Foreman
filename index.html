@@ -335,6 +335,7 @@
       <!-- =================== SKILLS =================== -->
       <div id="mode-skills" hidden>
         <section class="skills">
+          <div class="skills-left">
           <div class="card skills-list-card">
             <div class="card-title">
               <span>Skills</span>
@@ -346,6 +347,17 @@
             </div>
             <p class="hint">Reusable Claude Code skills in this repo's <code>.claude/skills/</code> — each is a folder with a <code>SKILL.md</code>. Add your own; agents and the pipeline can invoke them via the Skill tool.</p>
             <div id="skills-list" class="skills-list"><p class="muted">Select a repo to see its skills.</p></div>
+          </div>
+          <div class="card skills-build-card">
+            <div class="card-title"><span>Skill Builder</span><span id="skillbuild-state" class="skill-status"></span></div>
+            <p class="hint">Describe a skill — the builder agent writes the whole folder (<code>SKILL.md</code> + any scripts/references it needs) into <code>.claude/skills/</code>, then it appears on the left to edit.</p>
+            <textarea id="skillbuild-input" rows="3" placeholder="e.g. a skill that reviews Dockerfiles for security and image-size issues, with a checklist and a small lint script"></textarea>
+            <div class="row">
+              <button id="skillbuild-run" class="primary" disabled>▶ Build skill</button>
+              <button id="skillbuild-cancel" disabled>■ Cancel</button>
+            </div>
+            <div id="skillbuild-log" class="log skillbuild-log"></div>
+          </div>
           </div>
           <div class="card grow skills-editor-card">
             <div class="card-title"><span id="skill-edit-title">Skill editor</span><span id="skill-status" class="skill-status"></span><button id="skill-save" class="primary mini" disabled>Save</button></div>

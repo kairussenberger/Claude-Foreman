@@ -1193,6 +1193,140 @@ fn ship_agent(
     Ok(())
 }
 
+// --- Skill Builder: a promptable agent that authors complete skills into .claude/skills/. ---
+
+const SKILL_BUILDER_PREAMBLE: &str = r#"You are the Skill Builder for this repository — a specialist that authors complete, valid Claude Code skills.
+
+A skill lives at `.claude/skills/<skill-name>/SKILL.md`, where `<skill-name>` is a short lowercase-hyphen slug. SKILL.md must have YAML frontmatter with at least:
+- `name:` — exactly the folder slug.
+- `description:` — ONE specific, trigger-oriented line: what the skill does AND when Claude should use it. This is the text Claude reads to decide whether to load the skill, so make it concrete (start with "Use when ...").
+...plus a markdown body with the real instructions: a "When to use" section and concrete steps / conventions / checklists.
+
+When the human asks you to add or change a skill:
+1. Choose a clear slug, then create `.claude/skills/<slug>/SKILL.md` with correct frontmatter (name = the slug) and a focused, well-structured body.
+2. If the skill genuinely needs supporting files — helper scripts, reference docs, templates/assets — create them under that skill's own folder (`scripts/`, `references/`, `assets/`) and reference them from SKILL.md by their real relative paths. Keep scripts dependency-light (standard library only) and actually runnable. Never reference a file you did not create.
+3. Keep it focused: one skill, one job. Don't over-engineer.
+4. Work ONLY inside `.claude/skills/`. Do not modify anything else in the repository, and never commit, push, or run destructive commands.
+5. When you finish, report the skill name, every file you created, and a one-line summary of what the skill does and when it triggers."#;
+
+/// Run the Skill Builder agent (sonnet / medium, bypassPermissions) on the human's request.
+/// Keyed by "skill-builder" in the run map; writes a full skill folder under .claude/skills/.
+#[tauri::command]
+fn build_skill(app: AppHandle, state: State<RunState>, project: String, prompt: String) -> Result<(), String> {
+    let root = PathBuf::from(&project);
+    if !root.is_dir() {
+        return Err(format!("Not a directory: {project}"));
+    }
+    if state.children.lock().unwrap().contains_key("skill-builder") {
+        return Err("the skill builder is already working".into());
+    }
+    fs::create_dir_all(root.join(".claude/skills")).map_err(|e| e.to_string())?;
+    let claude = resolve_claude();
+    let full_prompt = format!("{SKILL_BUILDER_PREAMBLE}\n\nRequest: {prompt}");
+
+    let mut cmd = Command::new(&claude);
+    cmd.current_dir(&root)
+        .arg("-p")
+        .arg(&full_prompt)
+        .arg("--model")
+        .arg("sonnet")
+        .arg("--effort")
+        .arg("medium")
+        .arg("--permission-mode")
+        .arg("bypassPermissions")
+        .arg("--output-format")
+        .arg("stream-json")
+        .arg("--verbose")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to launch claude ({claude}): {e}"))?;
+
+    if let Some(stdout) = child.stdout.take() {
+        let app = app.clone();
+        thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let v: Value = match serde_json::from_str(&line) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                match v.get("type").and_then(|x| x.as_str()).unwrap_or("") {
+                    "assistant" => {
+                        if let Some(content) = v.pointer("/message/content").and_then(|c| c.as_array()) {
+                            for block in content {
+                                match block.get("type").and_then(|x| x.as_str()) {
+                                    Some("text") => {
+                                        if let Some(t) = block.get("text").and_then(|x| x.as_str()) {
+                                            let t = t.trim();
+                                            if !t.is_empty() {
+                                                let _ = app.emit(
+                                                    "skillbuild-log",
+                                                    ShipperEvent { kind: "assistant".into(), text: t.to_string() },
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Some("tool_use") => {
+                                        let name = block.get("name").and_then(|x| x.as_str()).unwrap_or("tool");
+                                        let _ = app.emit(
+                                            "skillbuild-log",
+                                            ShipperEvent { kind: "tool".into(), text: format!("⚙ {name}") },
+                                        );
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    "result" => {
+                        if let Some(r) = v.get("result").and_then(|x| x.as_str()) {
+                            let _ = app.emit("skillbuild-log", ShipperEvent { kind: "result".into(), text: r.to_string() });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        });
+    }
+    if let Some(stderr) = child.stderr.take() {
+        let app = app.clone();
+        thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                if !line.trim().is_empty() {
+                    let _ = app.emit("skillbuild-log", ShipperEvent { kind: "stderr".into(), text: line });
+                }
+            }
+        });
+    }
+
+    state.children.lock().unwrap().insert("skill-builder".into(), child);
+
+    let children = state.children.clone();
+    let done_app = app.clone();
+    thread::spawn(move || loop {
+        let mut map = children.lock().unwrap();
+        let finished = match map.get_mut("skill-builder") {
+            Some(c) => matches!(c.try_wait(), Ok(Some(_)) | Err(_)),
+            None => true,
+        };
+        if finished {
+            map.remove("skill-builder");
+            drop(map);
+            let _ = done_app.emit("skillbuild-done", ());
+            break;
+        }
+        drop(map);
+        thread::sleep(Duration::from_millis(300));
+    });
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1240,7 +1374,8 @@ pub fn run() {
             read_skill,
             write_skill,
             create_skill,
-            delete_skill
+            delete_skill,
+            build_skill
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
