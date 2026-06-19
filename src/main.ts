@@ -44,6 +44,7 @@ type HistoryEntry = {
   tokens: number;
   branch: string | null;
   worktree: string | null;
+  verdictFile?: string; // handoff file carrying the verdict (for NEEDS WORK re-runs)
 };
 type DoctorCheck = { name: string; ok: boolean; detail: string };
 type SkillInfo = { name: string; description: string };
@@ -551,6 +552,7 @@ function defaultDone(p: DoneEvent) {
     tokens: defaultRunTokens,
     branch: null,
     worktree: null,
+    verdictFile: customMode && customStages.length ? `${customStages[customStages.length - 1]}.md` : "review.md",
   });
   notify(
     "Foreman — pipeline finished",
@@ -968,6 +970,7 @@ function pRunDone(p: DoneEvent) {
     tokens: run.tokens,
     branch: run.branch,
     worktree: run.worktree,
+    verdictFile: "review.md",
   });
   activeCount = Math.max(0, activeCount - 1);
   if (selectedRun === run.id && run.worktree) showPFile(run, "review.md");
@@ -1011,6 +1014,14 @@ function renderHistory() {
     pill.className = `run-verdict ${classifyVerdict(h.verdict) || "stopped"}`;
     pill.textContent = h.verdict || "stopped";
     item.append(main, pill);
+    if (classifyVerdict(h.verdict) === "needs") {
+      const re = document.createElement("button");
+      re.className = "mini rerun-history";
+      re.textContent = "↻ rerun";
+      re.title = "Re-run, feeding the review findings back into the pipeline";
+      re.onclick = () => void rerunHistory(h);
+      item.append(re);
+    }
     if (h.worktree) {
       const wt = h.worktree;
       const rev = document.createElement("button");
@@ -1022,6 +1033,38 @@ function renderHistory() {
     }
     list.appendChild(item);
   }
+}
+
+// Re-run a NEEDS WORK history entry. Feeds the prior REVIEW/VERDICT findings back into the
+// pipeline (the previous code changes are still in the working tree), not just the raw prompt.
+async function rerunHistory(h: HistoryEntry) {
+  const repo = h.repo || project;
+  if (!repo) return;
+  let findings = "";
+  try {
+    findings = (await invoke<string>("read_handoff", { project: repo, name: h.verdictFile || "review.md" })).trim();
+  } catch {
+    findings = "";
+  }
+  const request = findings
+    ? `This is a re-run to resolve a previous NEEDS WORK verdict. The earlier attempt's code changes are already in the working tree — build on them, do not start over.\n\nOriginal task:\n${h.request}\n\nAddress EVERY finding from the review below, then run the pipeline through to an updated verdict:\n\n--- previous review ---\n${findings}`
+    : h.request;
+  if (!findings) appendLog({ run_id: DEFAULT_RUN, kind: "system", text: "↻ prior review not found — re-running the original request", raw: "" });
+
+  if (repo !== project) setProject(repo);
+  if (h.mode === "parallel") {
+    setMode("parallel");
+    ($("queue-input") as HTMLTextAreaElement).value = request;
+    addToQueue(); // overnight runs go back through the queue — user hits Start
+    return;
+  }
+  setMode(h.mode as AppMode); // "default" | "fast" | "custom" — all reuse the run pane
+  if (h.mode === "custom") {
+    await loadCustomPipeline(); // ensure the repo's stage list is loaded before running
+    renderCustom();
+  }
+  ($("request") as HTMLTextAreaElement).value = request;
+  await runPipeline();
 }
 
 // ---- Skills (native Claude Code skills under .claude/skills/) ----

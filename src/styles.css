@@ -503,6 +503,8 @@ textarea:focus, select:focus { outline: none; border-color: var(--accent); box-s
 .skill-status { flex: 1 1 auto; text-align: right; font-size: 11px; font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .skill-status.err { color: var(--red); }
 .skill-status.warn { color: var(--amber); }
+.rerun-history { color: var(--amber); white-space: nowrap; }
+.rerun-history:hover:not(:disabled) { border-color: var(--amber); background: #fdf3e0; }
 .skills-list { display: flex; flex-direction: column; gap: 6px; overflow-y: auto; min-height: 0; flex: 1 1 auto; }
 .skill-item {
   display: flex; align-items: flex-start; justify-content: space-between; gap: 8px;
