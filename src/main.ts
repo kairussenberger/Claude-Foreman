@@ -34,10 +34,10 @@ type UsageEvent = {
   is_final: boolean;
 };
 type SessionEvent = { run_id: string; session_id: string };
-type AppMode = "default" | "parallel" | "history";
+type AppMode = "default" | "fast" | "parallel" | "history" | "skills";
 type HistoryEntry = {
   time: number;
-  mode: "default" | "parallel";
+  mode: "default" | "parallel" | "fast";
   repo: string;
   request: string;
   verdict: string | null;
@@ -46,6 +46,7 @@ type HistoryEntry = {
   worktree: string | null;
 };
 type DoctorCheck = { name: string; ok: boolean; detail: string };
+type SkillInfo = { name: string; description: string };
 
 type StageState = "idle" | "running" | "done" | "blocked";
 type Run = {
@@ -70,17 +71,28 @@ const HANDOFF_FOR: Record<string, string> = {
   reviewer: "review.md",
 };
 const HANDOFFS = ["spec.md", "changes.md", "test-results.md", "review.md"];
+// Fast mode has its own independent agents. "done" events arrive keyed to the handoff file
+// (the watcher labels them coder/reviewer), so map file → fast card to light the right figure.
+const FAST_AGENT_FOR_FILE: Record<string, string> = { "changes.md": "fast-coder", "review.md": "fast-reviewer" };
+const ALL_STAGE_CARDS = ["planner", "coder", "tester", "reviewer", "fast-coder", "fast-reviewer"];
 const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
 const AUTOFIX_PROMPT =
   "The review verdict was not SHIP. Read .pipeline/review.md and address EVERY finding: " +
   "delegate to the coder to fix them, then the tester to re-run the tests, then the reviewer to " +
   "re-review and rewrite .pipeline/review.md with an updated verdict. Work autonomously — do not " +
   "ask me anything; make the best decision and proceed to a new verdict.";
+const FAST_AUTOFIX_PROMPT =
+  "The review verdict was not SHIP. Read .pipeline/review.md and address EVERY finding: " +
+  "delegate to the fast-coder to fix them, then the fast-reviewer to re-review and rewrite " +
+  ".pipeline/review.md with an updated verdict. Work autonomously — do not ask me anything; " +
+  "make the best decision and proceed to a new verdict.";
 const STAGE_RERUN: Record<string, string> = {
   planner: "Re-run ONLY the planner stage: re-read the codebase and rewrite .pipeline/spec.md. Do not run the other stages.",
   coder: "Re-run ONLY the coder stage: re-implement against the current .pipeline/spec.md and rewrite .pipeline/changes.md. Do not run the other stages.",
   tester: "Re-run ONLY the tester stage: re-run the tests for the current changes and rewrite .pipeline/test-results.md. Do not run the other stages.",
   reviewer: "Re-run ONLY the reviewer stage: re-review the current changes and rewrite .pipeline/review.md with a fresh verdict. Do not run the other stages.",
+  "fast-coder": "Re-run ONLY the fast-coder stage: re-implement the change and rewrite .pipeline/changes.md. Do not run the reviewer.",
+  "fast-reviewer": "Re-run ONLY the fast-reviewer stage: re-review the current changes and rewrite .pipeline/review.md with a fresh verdict. Do not run the coder.",
 };
 const DEFAULT_RUN = "default";
 
@@ -99,7 +111,9 @@ let running = false; // default-mode single run
 let activeFile: string | null = null;
 let sessionTokens = Number(localStorage.getItem("foreman.sessionTokens") || "0");
 const savedMode = localStorage.getItem("foreman.mode");
-let appMode: AppMode = savedMode === "parallel" || savedMode === "history" ? savedMode : "default";
+const KNOWN_MODES = ["default", "fast", "parallel", "history", "skills"];
+let appMode: AppMode = (KNOWN_MODES.includes(savedMode || "") ? savedMode : "default") as AppMode;
+let fastMode = appMode === "fast"; // fast = default pane, Coder→Reviewer only
 let defaultSessionId: string | null = null; // for resuming a paused default-mode run
 let defaultRequest = "";
 let defaultRunTokens = 0;
@@ -108,6 +122,8 @@ let awaitingConfirmation = false; // first pause of a default run is the Planner
 let history: HistoryEntry[] = JSON.parse(localStorage.getItem("foreman.history") || "[]");
 let profiles: Record<string, { effort: string; perm: string }> = JSON.parse(localStorage.getItem("foreman.profiles") || "{}");
 let editingAgent: string | null = null;
+let currentSkill: string | null = null;
+let pendingSkillDelete: string | null = null;
 
 // Parallel-mode state
 const queue: string[] = [];
@@ -136,6 +152,7 @@ function setProject(path: string) {
   updateStartBtn();
   refreshStatus();
   renderDoctor();
+  if (appMode === "skills") renderSkills();
 }
 
 // ---- Status (default mode) ----
@@ -281,13 +298,13 @@ async function runPipeline() {
   defaultSessionId = null;
   defaultRequest = request;
   defaultRunTokens = 0;
-  awaitingConfirmation = true;
+  awaitingConfirmation = !fastMode; // fast mode skips the Planner's confirmation gate
   autoFixRemaining = ($("autofix") as HTMLInputElement).checked
     ? Math.max(1, Math.min(3, Number(($("autofix-passes") as HTMLInputElement).value) || 1))
     : 0;
   if (clean_first) $("log").innerHTML = "";
   setRunning(true);
-  setStageState("planner", "running");
+  setStageState(fastMode ? "fast-coder" : "planner", "running");
 
   try {
     await invoke("run_pipeline", {
@@ -299,8 +316,9 @@ async function runPipeline() {
       autonomous: false,
       resume: null,
       cleanFirst: clean_first,
+      fast: fastMode,
     });
-    appendLog({ run_id: DEFAULT_RUN, kind: "system", text: `▶ shipping (effort: ${effort}): ${request}`, raw: "" });
+    appendLog({ run_id: DEFAULT_RUN, kind: "system", text: `▶ ${fastMode ? "fast-" : ""}shipping (effort: ${effort}): ${request}`, raw: "" });
   } catch (e) {
     appendLog({ run_id: DEFAULT_RUN, kind: "stderr", text: `run error: ${e}`, raw: "" });
     setRunning(false);
@@ -328,7 +346,7 @@ function setRunning(state: boolean) {
 
 // ---- Default-mode stages ----
 function resetStages() {
-  for (const agent of STAGE_ORDER) setStageState(agent, "idle");
+  for (const agent of ALL_STAGE_CARDS) setStageState(agent, "idle");
 }
 function setStageState(agent: string, state: StageState) {
   const el = document.querySelector<HTMLElement>(`#mode-default .agent[data-agent="${agent}"]`);
@@ -447,12 +465,15 @@ function renderSession() {
 // ---- Default-mode event handlers ----
 function defaultStage(p: StageEvent) {
   if (p.phase === "running") {
-    setStageState(p.agent, "running");
+    setStageState(p.agent, "running"); // p.agent is the real subagent_type (fast-coder/coder/…)
     return;
   }
-  setStageState(p.agent, "done");
+  // "done" comes from the file watcher (labelled coder/reviewer); in fast mode map the file to
+  // the fast crew card so the right figure lights up.
+  const agent = fastMode ? FAST_AGENT_FOR_FILE[p.file] : p.agent;
+  if (agent) setStageState(agent, "done");
   refreshStatus();
-  showFile(HANDOFF_FOR[p.agent]);
+  showFile(p.file || HANDOFF_FOR[p.agent]);
 }
 function defaultDone(p: DoneEvent) {
   setRunning(false);
@@ -484,7 +505,7 @@ function defaultDone(p: DoneEvent) {
   }
   recordRun({
     time: Date.now(),
-    mode: "default",
+    mode: fastMode ? "fast" : "default",
     repo: project || "",
     request: defaultRequest,
     verdict: p.verdict,
@@ -508,7 +529,7 @@ function runAutoFix(verdict: string | null) {
   invoke("run_pipeline", {
     runId: DEFAULT_RUN,
     project,
-    request: AUTOFIX_PROMPT,
+    request: fastMode ? FAST_AUTOFIX_PROMPT : AUTOFIX_PROMPT,
     permissionMode: ($("perm-mode") as HTMLSelectElement).value,
     effort: currentEffort(),
     autonomous: false,
@@ -964,17 +985,157 @@ function renderHistory() {
   }
 }
 
+// ---- Skills (native Claude Code skills under .claude/skills/) ----
+async function renderSkills() {
+  const list = $("skills-list");
+  if (!project) {
+    list.innerHTML = `<p class="muted">Select a repo to see its skills.</p>`;
+    return;
+  }
+  try {
+    const skills = await invoke<SkillInfo[]>("list_skills", { project });
+    if (!skills.length) {
+      list.innerHTML = `<p class="muted">No skills yet. Click ＋ New to add one — it lives in <code>.claude/skills/</code>.</p>`;
+      return;
+    }
+    list.innerHTML = "";
+    for (const s of skills) {
+      const item = document.createElement("div");
+      item.className = "skill-item" + (s.name === currentSkill ? " selected" : "");
+      const main = document.createElement("div");
+      main.className = "skill-main";
+      main.onclick = () => openSkill(s.name);
+      const nm = document.createElement("div");
+      nm.className = "skill-name";
+      nm.textContent = s.name;
+      const ds = document.createElement("div");
+      ds.className = "skill-desc";
+      ds.textContent = s.description || "(no description)";
+      main.append(nm, ds);
+      const del = document.createElement("button");
+      del.className = "mini skill-del";
+      del.textContent = pendingSkillDelete === s.name ? "sure?" : "🗑";
+      del.title = "Delete this skill";
+      del.onclick = (e) => {
+        e.stopPropagation();
+        deleteSkill(s.name);
+      };
+      item.append(main, del);
+      list.appendChild(item);
+    }
+  } catch (e) {
+    list.innerHTML = `<p class="muted">skills error: ${e}</p>`;
+  }
+}
+function setSkillStatus(msg: string, isError = false) {
+  const el = $("skill-status");
+  el.textContent = msg;
+  el.classList.toggle("err", isError);
+}
+async function openSkill(name: string) {
+  if (!project) return;
+  try {
+    const content = await invoke<string>("read_skill", { project, name });
+    currentSkill = name;
+    pendingSkillDelete = null;
+    $("skill-edit-title").textContent = `${name}/SKILL.md`;
+    ($("skill-text") as HTMLTextAreaElement).value = content;
+    ($("skill-save") as HTMLButtonElement).disabled = false;
+    setSkillStatus("");
+    renderSkills();
+  } catch (e) {
+    setSkillStatus(`open failed: ${e}`, true);
+  }
+}
+async function saveSkill() {
+  if (!project || !currentSkill) return;
+  try {
+    await invoke("write_skill", { project, name: currentSkill, content: ($("skill-text") as HTMLTextAreaElement).value });
+    setSkillStatus(`saved ${currentSkill}`);
+    renderSkills();
+  } catch (e) {
+    setSkillStatus(`save failed: ${e}`, true);
+  }
+}
+function startNewSkill() {
+  const inp = $("skill-new-name") as HTMLInputElement;
+  const wasHidden = inp.classList.contains("hidden");
+  inp.classList.remove("hidden");
+  $("skill-create").classList.remove("hidden");
+  if (wasHidden) inp.value = ""; // only clear on a fresh open — never wipe text mid-type
+  inp.focus();
+}
+function cancelNewSkill() {
+  ($("skill-new-name") as HTMLInputElement).classList.add("hidden");
+  $("skill-create").classList.add("hidden");
+}
+async function submitNewSkill() {
+  if (!project) {
+    setSkillStatus("select a repo first", true);
+    return;
+  }
+  const inp = $("skill-new-name") as HTMLInputElement;
+  const name = inp.value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  if (!name) {
+    setSkillStatus("type a skill name", true);
+    inp.focus();
+    return;
+  }
+  try {
+    await invoke("create_skill", { project, name });
+    cancelNewSkill();
+    setSkillStatus(`created ${name}`);
+    await renderSkills();
+    openSkill(name);
+  } catch (e) {
+    setSkillStatus(`create failed: ${e}`, true);
+  }
+}
+async function deleteSkill(name: string) {
+  if (!project) return;
+  if (pendingSkillDelete !== name) {
+    pendingSkillDelete = name; // two-step: first click arms, second confirms
+    setSkillStatus(`click 🗑 again to delete ${name}`);
+    renderSkills();
+    return;
+  }
+  pendingSkillDelete = null;
+  try {
+    await invoke("delete_skill", { project, name });
+    if (currentSkill === name) {
+      currentSkill = null;
+      ($("skill-text") as HTMLTextAreaElement).value = "";
+      $("skill-edit-title").textContent = "Skill editor";
+      ($("skill-save") as HTMLButtonElement).disabled = true;
+    }
+    setSkillStatus(`deleted ${name}`);
+    renderSkills();
+  } catch (e) {
+    setSkillStatus(`delete failed: ${e}`, true);
+  }
+}
+
 // ---- Mode switching ----
 function setMode(mode: AppMode) {
   appMode = mode;
+  fastMode = mode === "fast";
   localStorage.setItem("foreman.mode", mode);
-  ($("mode-default") as HTMLElement).hidden = mode !== "default";
+  const showDefault = mode === "default" || mode === "fast"; // fast reuses the default pane
+  ($("mode-default") as HTMLElement).hidden = !showDefault;
+  ($("mode-default") as HTMLElement).classList.toggle("fast", fastMode);
   ($("mode-parallel") as HTMLElement).hidden = mode !== "parallel";
   ($("mode-history") as HTMLElement).hidden = mode !== "history";
+  ($("mode-skills") as HTMLElement).hidden = mode !== "skills";
   document.querySelectorAll(".menu-item").forEach((m) => m.classList.toggle("active", (m as HTMLElement).dataset.mode === mode));
-  $("mode-tag").textContent = mode === "parallel" ? "overnight" : mode === "history" ? "history" : "agent pipeline";
+  $("mode-tag").textContent =
+    mode === "parallel" ? "overnight"
+      : mode === "history" ? "history"
+      : mode === "fast" ? "fast"
+      : mode === "skills" ? "skills"
+      : "agent pipeline";
   $("menu").classList.add("hidden");
   if (mode === "history") renderHistory();
+  if (mode === "skills") renderSkills();
 }
 
 // ---- Shipper window (5th agent) ----
@@ -1068,6 +1229,18 @@ $("history-clear").addEventListener("click", () => {
   history = [];
   localStorage.setItem("foreman.history", "[]");
   renderHistory();
+});
+
+$("skill-new").addEventListener("click", startNewSkill);
+$("skill-create").addEventListener("click", submitNewSkill);
+$("skill-save").addEventListener("click", saveSkill);
+($("skill-new-name") as HTMLInputElement).addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    submitNewSkill();
+  } else if (e.key === "Escape") {
+    cancelNewSkill();
+  }
 });
 
 const savedEffort = localStorage.getItem("foreman.effort");

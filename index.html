@@ -23,9 +23,11 @@
     </header>
 
     <div id="menu" class="menu hidden">
-      <button class="menu-item" data-mode="default">Default mode<small>one feature at a time</small></button>
+      <button class="menu-item" data-mode="default">Default mode<small>plan → code → test → review</small></button>
+      <button class="menu-item" data-mode="fast">Fast mode<small>coder → reviewer · skip planning</small></button>
       <button class="menu-item" data-mode="parallel">Parallelised — overnight<small>queue many · own worktree each</small></button>
       <button class="menu-item" data-mode="history">History<small>past runs &amp; verdicts</small></button>
+      <button class="menu-item" data-mode="skills">Skills<small>reusable .claude/skills · add your own</small></button>
     </div>
 
     <main>
@@ -138,6 +140,60 @@
             </div>
             <span class="agent-state">idle</span>
           </div>
+
+          <!-- Fast-mode crew — independent agents (fast-coder / fast-reviewer), shown only in Fast mode -->
+          <div class="agent fast-only" data-agent="fast-coder" style="--c:#1f9e8b">
+            <div class="fig-wrap">
+              <svg class="fig" viewBox="0 0 60 96" aria-hidden="true">
+                <rect x="20" y="74" width="8" height="20" rx="1" fill="#3a3f47" />
+                <rect x="32" y="74" width="8" height="20" rx="1" fill="#3a3f47" />
+                <rect x="9" y="40" width="7" height="30" rx="3" fill="#177a6b" />
+                <rect x="44" y="40" width="7" height="30" rx="3" fill="#177a6b" />
+                <rect x="14" y="36" width="32" height="40" rx="4" fill="#1f9e8b" />
+                <rect x="27" y="42" width="6" height="22" rx="2" fill="#f1f0ec" />
+                <rect x="19" y="13" width="22" height="24" rx="4" fill="#e9c8a3" />
+                <rect x="25" y="24" width="3" height="4" rx="1" fill="#2b2b2b" />
+                <rect x="33" y="24" width="3" height="4" rx="1" fill="#2b2b2b" />
+                <rect x="18" y="9" width="24" height="10" rx="6" fill="#3a3f47" />
+              </svg>
+            </div>
+            <div class="agent-meta">
+              <span class="agent-name">Fast Coder</span>
+              <select class="model-select" data-agent="fast-coder" title="Model" disabled>
+                <option value="opus">Opus</option><option value="sonnet">Sonnet</option><option value="haiku">Haiku</option><option value="fable">Fable</option><option value="inherit">Inherit</option>
+              </select>
+              <button class="rerun-stage mini" data-agent="fast-coder" title="Re-run this stage" disabled>↻</button>
+            </div>
+            <span class="agent-state">idle</span>
+          </div>
+
+          <div class="flow fast-only">→</div>
+
+          <div class="agent fast-only" data-agent="fast-reviewer" style="--c:#d9772e">
+            <div class="fig-wrap">
+              <svg class="fig" viewBox="0 0 60 96" aria-hidden="true">
+                <rect x="20" y="74" width="8" height="20" rx="1" fill="#3a3f47" />
+                <rect x="32" y="74" width="8" height="20" rx="1" fill="#3a3f47" />
+                <rect x="9" y="40" width="7" height="30" rx="3" fill="#b35e1c" />
+                <rect x="44" y="40" width="7" height="30" rx="3" fill="#b35e1c" />
+                <rect x="14" y="36" width="32" height="40" rx="4" fill="#d9772e" />
+                <rect x="27" y="42" width="6" height="22" rx="2" fill="#f1f0ec" />
+                <rect x="19" y="13" width="22" height="24" rx="4" fill="#e9c8a3" />
+                <rect x="25" y="24" width="3" height="4" rx="1" fill="#2b2b2b" />
+                <rect x="33" y="24" width="3" height="4" rx="1" fill="#2b2b2b" />
+                <rect x="14" y="16" width="32" height="3" rx="1" fill="#2b2b2b" />
+                <rect x="20" y="7" width="20" height="11" rx="8" fill="#2b2b2b" />
+              </svg>
+            </div>
+            <div class="agent-meta">
+              <span class="agent-name">Fast Reviewer</span>
+              <select class="model-select" data-agent="fast-reviewer" title="Model" disabled>
+                <option value="opus">Opus</option><option value="sonnet">Sonnet</option><option value="haiku">Haiku</option><option value="fable">Fable</option><option value="inherit">Inherit</option>
+              </select>
+              <button class="rerun-stage mini" data-agent="fast-reviewer" title="Re-run this stage" disabled>↻</button>
+            </div>
+            <span class="agent-state">idle</span>
+          </div>
         </section>
 
         <section class="workspace">
@@ -157,6 +213,8 @@
                 <button class="edit-agent mini" data-agent="coder" disabled>✎ coder</button>
                 <button class="edit-agent mini" data-agent="tester" disabled>✎ tester</button>
                 <button class="edit-agent mini" data-agent="reviewer" disabled>✎ reviewer</button>
+                <button class="edit-agent mini fast-only" data-agent="fast-coder" disabled>✎ fast-coder</button>
+                <button class="edit-agent mini fast-only" data-agent="fast-reviewer" disabled>✎ fast-reviewer</button>
               </div>
             </div>
 
@@ -270,6 +328,28 @@
           <div class="card grow">
             <div class="card-title"><span>Run history</span><button id="history-clear" class="mini">clear</button></div>
             <div id="history-list" class="history-list"><p class="muted">Completed runs appear here.</p></div>
+          </div>
+        </section>
+      </div>
+
+      <!-- =================== SKILLS =================== -->
+      <div id="mode-skills" hidden>
+        <section class="skills">
+          <div class="card skills-list-card">
+            <div class="card-title">
+              <span>Skills</span>
+              <span class="skills-head-actions">
+                <input id="skill-new-name" class="skill-new-name hidden" placeholder="skill-name" spellcheck="false" />
+                <button id="skill-create" class="mini primary hidden">Create</button>
+                <button id="skill-new" class="mini">＋ New</button>
+              </span>
+            </div>
+            <p class="hint">Reusable Claude Code skills in this repo's <code>.claude/skills/</code> — each is a folder with a <code>SKILL.md</code>. Add your own; agents and the pipeline can invoke them via the Skill tool.</p>
+            <div id="skills-list" class="skills-list"><p class="muted">Select a repo to see its skills.</p></div>
+          </div>
+          <div class="card grow skills-editor-card">
+            <div class="card-title"><span id="skill-edit-title">Skill editor</span><span id="skill-status" class="skill-status"></span><button id="skill-save" class="primary mini" disabled>Save</button></div>
+            <textarea id="skill-text" class="ae-text skill-text" spellcheck="false" placeholder="Select a skill on the left, or ＋ New to create one."></textarea>
           </div>
         </section>
       </div>

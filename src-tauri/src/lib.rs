@@ -27,8 +27,11 @@ const PLANNER_MD: &str = include_str!("../templates/planner.md");
 const CODER_MD: &str = include_str!("../templates/coder.md");
 const TESTER_MD: &str = include_str!("../templates/tester.md");
 const REVIEWER_MD: &str = include_str!("../templates/reviewer.md");
+const FAST_CODER_MD: &str = include_str!("../templates/fast-coder.md");
+const FAST_REVIEWER_MD: &str = include_str!("../templates/fast-reviewer.md");
 const SHIP_MD: &str = include_str!("../templates/ship.md");
 const SHIP_AUTO_MD: &str = include_str!("../templates/ship-auto.md");
+const SHIP_FAST_MD: &str = include_str!("../templates/ship-fast.md");
 const SETTINGS_JSON: &str = include_str!("../templates/settings.json");
 
 struct Asset {
@@ -42,8 +45,11 @@ fn assets() -> Vec<Asset> {
         Asset { rel: ".claude/agents/coder.md", contents: CODER_MD },
         Asset { rel: ".claude/agents/tester.md", contents: TESTER_MD },
         Asset { rel: ".claude/agents/reviewer.md", contents: REVIEWER_MD },
+        Asset { rel: ".claude/agents/fast-coder.md", contents: FAST_CODER_MD },
+        Asset { rel: ".claude/agents/fast-reviewer.md", contents: FAST_REVIEWER_MD },
         Asset { rel: ".claude/commands/ship.md", contents: SHIP_MD },
         Asset { rel: ".claude/commands/ship-auto.md", contents: SHIP_AUTO_MD },
+        Asset { rel: ".claude/commands/ship-fast.md", contents: SHIP_FAST_MD },
         Asset { rel: ".claude/settings.json", contents: SETTINGS_JSON },
     ]
 }
@@ -56,7 +62,11 @@ const STAGES: [(&str, &str); 4] = [
     ("reviewer", "review.md"),
 ];
 
+// The four CORE agents (default pipeline). `initialized`/doctor readiness keys off these.
 const AGENTS: [&str; 4] = ["planner", "coder", "tester", "reviewer"];
+// Everything Foreman installs + lets you edit / set a model on / delegate to (core + the
+// fast pipeline's own independent agents).
+const ALL_AGENTS: [&str; 6] = ["planner", "coder", "tester", "reviewer", "fast-coder", "fast-reviewer"];
 
 // Models offered in the per-agent picker. Aliases resolve to the latest version;
 // `inherit` means "use the session model". Full ids (claude-opus-4-8, …) also work.
@@ -110,6 +120,12 @@ struct PipelineStatus {
 struct WorktreeInfo {
     path: String,
     branch: String,
+}
+
+#[derive(Serialize)]
+struct SkillInfo {
+    name: String,
+    description: String,
 }
 
 #[derive(Serialize)]
@@ -374,6 +390,7 @@ fn install_assets(root: &Path, force: bool) -> Result<Vec<FileResult>, String> {
         }
     }
     fs::create_dir_all(root.join(".pipeline")).map_err(|e| e.to_string())?;
+    fs::create_dir_all(root.join(".claude/skills")).map_err(|e| e.to_string())?;
     Ok(files)
 }
 
@@ -446,11 +463,11 @@ fn pipeline_status(project: String) -> Result<PipelineStatus, String> {
     let root = PathBuf::from(&project);
     let mut agents = Vec::new();
     let mut all_present = true;
-    for agent in AGENTS {
+    for agent in ALL_AGENTS {
         let p = root.join(format!(".claude/agents/{agent}.md"));
         let present = p.exists();
-        if !present {
-            all_present = false;
+        if AGENTS.contains(&agent) && !present {
+            all_present = false; // default-mode readiness keys off the core four only
         }
         agents.push(AgentInfo {
             name: agent.to_string(),
@@ -483,7 +500,7 @@ fn pipeline_status(project: String) -> Result<PipelineStatus, String> {
 /// (2) Set the model for one agent by rewriting its frontmatter `model:` line.
 #[tauri::command]
 fn set_agent_model(project: String, agent: String, model: String) -> Result<(), String> {
-    if !AGENTS.contains(&agent.as_str()) {
+    if !ALL_AGENTS.contains(&agent.as_str()) {
         return Err(format!("unknown agent: {agent}"));
     }
     if !ALLOWED_MODELS.contains(&model.as_str()) {
@@ -521,7 +538,7 @@ fn set_agent_model(project: String, agent: String, model: String) -> Result<(), 
 /// (Config) Read a full agent prompt file for in-app editing.
 #[tauri::command]
 fn read_agent_file(project: String, agent: String) -> Result<String, String> {
-    if !AGENTS.contains(&agent.as_str()) {
+    if !ALL_AGENTS.contains(&agent.as_str()) {
         return Err(format!("unknown agent: {agent}"));
     }
     let p = PathBuf::from(&project).join(format!(".claude/agents/{agent}.md"));
@@ -531,7 +548,7 @@ fn read_agent_file(project: String, agent: String) -> Result<String, String> {
 /// (Config) Write an edited agent prompt file back to the repo.
 #[tauri::command]
 fn write_agent_file(project: String, agent: String, content: String) -> Result<(), String> {
-    if !AGENTS.contains(&agent.as_str()) {
+    if !ALL_AGENTS.contains(&agent.as_str()) {
         return Err(format!("unknown agent: {agent}"));
     }
     let p = PathBuf::from(&project).join(format!(".claude/agents/{agent}.md"));
@@ -564,7 +581,7 @@ fn doctor(project: String) -> Vec<DoctorCheck> {
     });
 
     let root = PathBuf::from(&project);
-    let agents_ok = AGENTS.iter().all(|a| root.join(format!(".claude/agents/{a}.md")).exists())
+    let agents_ok = ALL_AGENTS.iter().all(|a| root.join(format!(".claude/agents/{a}.md")).exists())
         && root.join(".claude/commands/ship.md").exists();
     checks.push(DoctorCheck {
         name: "Pipeline installed".into(),
@@ -599,6 +616,106 @@ fn clean_pipeline(project: String) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+// --- Skills: reusable Claude Code skills under .claude/skills/<name>/SKILL.md ---
+
+const SKILL_TEMPLATE: &str = "---\nname: {name}\ndescription: What this skill does and WHEN Claude should use it — this line is the trigger Claude reads to decide whether to load the skill, so make it specific. e.g. \"Use when the user wants to … ; covers … .\"\n---\n\n# {name}\n\n## When to use\nThe situations, file types, or requests that should invoke this skill — mirror the trigger you wrote in the description above.\n\n## Instructions\nThe concrete steps, conventions, or checklist Claude should follow when this skill applies. Keep it focused — one skill, one job.\n";
+
+fn valid_skill_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err("invalid skill name".into());
+    }
+    Ok(())
+}
+
+/// Best-effort read of a skill's `description:` from its SKILL.md frontmatter.
+fn read_skill_description(path: &Path) -> String {
+    let Ok(txt) = fs::read_to_string(path) else {
+        return String::new();
+    };
+    let mut in_fm = false;
+    for line in txt.lines() {
+        let t = line.trim();
+        if t == "---" {
+            if in_fm {
+                break;
+            }
+            in_fm = true;
+            continue;
+        }
+        if in_fm {
+            if let Some(rest) = t.strip_prefix("description:") {
+                return rest.trim().trim_matches('"').to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+/// (Skills) List the skills installed in a repo's `.claude/skills/`.
+#[tauri::command]
+fn list_skills(project: String) -> Result<Vec<SkillInfo>, String> {
+    let dir = PathBuf::from(&project).join(".claude/skills");
+    let mut out = Vec::new();
+    if !dir.is_dir() {
+        return Ok(out);
+    }
+    for entry in fs::read_dir(&dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let skill_md = entry.path().join("SKILL.md");
+        if !skill_md.exists() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        out.push(SkillInfo { description: read_skill_description(&skill_md), name });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
+/// (Skills) Read a skill's SKILL.md for editing.
+#[tauri::command]
+fn read_skill(project: String, name: String) -> Result<String, String> {
+    valid_skill_name(&name)?;
+    let p = PathBuf::from(&project).join(".claude/skills").join(&name).join("SKILL.md");
+    fs::read_to_string(&p).map_err(|e| e.to_string())
+}
+
+/// (Skills) Write an edited SKILL.md back (creates the folder if needed).
+#[tauri::command]
+fn write_skill(project: String, name: String, content: String) -> Result<(), String> {
+    valid_skill_name(&name)?;
+    let dir = PathBuf::from(&project).join(".claude/skills").join(&name);
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    fs::write(dir.join("SKILL.md"), content).map_err(|e| e.to_string())
+}
+
+/// (Skills) Create a new skill from the template. Errors if it already exists.
+#[tauri::command]
+fn create_skill(project: String, name: String) -> Result<(), String> {
+    valid_skill_name(&name)?;
+    let dir = PathBuf::from(&project).join(".claude/skills").join(&name);
+    let skill_md = dir.join("SKILL.md");
+    if skill_md.exists() {
+        return Err(format!("skill '{name}' already exists"));
+    }
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    fs::write(skill_md, SKILL_TEMPLATE.replace("{name}", &name)).map_err(|e| e.to_string())
+}
+
+/// (Skills) Delete a skill folder and its contents.
+#[tauri::command]
+fn delete_skill(project: String, name: String) -> Result<(), String> {
+    valid_skill_name(&name)?;
+    let dir = PathBuf::from(&project).join(".claude/skills").join(&name);
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    fs::remove_dir_all(&dir).map_err(|e| e.to_string())
 }
 
 /// (4) Create an isolated git worktree + branch for an overnight run, and install the
@@ -683,6 +800,7 @@ fn run_pipeline(
     autonomous: bool,
     resume: Option<String>,
     clean_first: bool,
+    fast: Option<bool>,
 ) -> Result<(), String> {
     let root = PathBuf::from(&project);
     if !root.is_dir() {
@@ -698,7 +816,13 @@ fn run_pipeline(
 
     let claude = resolve_claude();
     let mode = valid_permission_mode(&permission_mode).to_string();
-    let command = if autonomous { "ship-auto" } else { "ship" };
+    let command = if autonomous {
+        "ship-auto"
+    } else if fast.unwrap_or(false) {
+        "ship-fast"
+    } else {
+        "ship"
+    };
     // Fresh run → `/ship[-auto] <request>`; resumed run → send the human's answer verbatim.
     let prompt = match &resume {
         Some(_) => request.clone(),
@@ -778,7 +902,7 @@ fn run_pipeline(
                                         if let Some(sub) =
                                             block.pointer("/input/subagent_type").and_then(|x| x.as_str())
                                         {
-                                            if AGENTS.contains(&sub) {
+                                            if ALL_AGENTS.contains(&sub) {
                                                 let _ = app.emit(
                                                     "pipeline-stage",
                                                     StageEvent {
@@ -1111,7 +1235,12 @@ pub fn run() {
             run_pipeline,
             cancel_run,
             cancel_all,
-            ship_agent
+            ship_agent,
+            list_skills,
+            read_skill,
+            write_skill,
+            create_skill,
+            delete_skill
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -476,3 +476,37 @@ textarea:focus, select:focus { outline: none; border-color: var(--accent); box-s
 .composer textarea { flex: 1 1 auto; }
 .composer-actions { display: flex; flex-direction: column; gap: 6px; }
 .composer-actions button { white-space: nowrap; }
+
+/* Fast mode runs its own independent crew (fast-coder / fast-reviewer). Outside fast mode
+   those cards/buttons are hidden; inside fast mode the four default-pipeline cards are. */
+#mode-default:not(.fast) .fast-only { display: none; }
+#mode-default.fast .agent[data-agent="planner"],
+#mode-default.fast .agent[data-agent="coder"],
+#mode-default.fast .agent[data-agent="tester"],
+#mode-default.fast .agent[data-agent="reviewer"],
+#mode-default.fast .flow:not(.fast-only),
+#mode-default.fast .edit-agent[data-agent="planner"],
+#mode-default.fast .edit-agent[data-agent="coder"],
+#mode-default.fast .edit-agent[data-agent="tester"],
+#mode-default.fast .edit-agent[data-agent="reviewer"] { display: none; }
+
+/* Skills view */
+.skills { display: grid; grid-template-columns: 320px 1fr; gap: 14px; padding: 14px; height: 100%; box-sizing: border-box; }
+.skills-head-actions { display: inline-flex; gap: 6px; align-items: center; }
+.skill-new-name { font-size: 12px; padding: 3px 7px; width: 180px; }
+.skill-new-name.hidden, #skill-create.hidden { display: none; }
+.skill-status { flex: 1 1 auto; text-align: right; font-size: 11px; font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.skill-status.err { color: var(--red); }
+.skills-list { display: flex; flex-direction: column; gap: 6px; overflow-y: auto; min-height: 0; }
+.skill-item {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 8px;
+  padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; background: var(--panel);
+}
+.skill-item:hover { border-color: var(--accent); }
+.skill-item.selected { border-color: var(--accent); background: var(--accent-soft); }
+.skill-main { flex: 1 1 auto; min-width: 0; }
+.skill-name { font-weight: 600; font-size: 13px; }
+.skill-desc { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.skill-del { flex: 0 0 auto; }
+.skills-editor-card { display: flex; flex-direction: column; }
+.skill-text { flex: 1 1 auto; min-height: 320px; font-family: var(--mono); font-size: 12.5px; }

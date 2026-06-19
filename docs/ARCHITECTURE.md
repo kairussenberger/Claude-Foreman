@@ -55,9 +55,10 @@ when asked.
 | `clean_pipeline(project)` | Delete handoff files for a fresh run |
 | `create_worktree(repo, slug)` | `git worktree add` + copy the repo's `.claude` config in (preserves model picks) |
 | `remove_worktree(repo, path, branch)` | Remove a worktree + safe-delete its (empty) branch |
-| `run_pipeline(run_id, project, request, permission_mode, effort, autonomous, resume, clean_first)` | The core runner — spawn `claude`, stream events keyed by `run_id` |
+| `run_pipeline(run_id, project, request, permission_mode, effort, autonomous, resume, clean_first, fast)` | The core runner — spawn `claude`, stream events keyed by `run_id`. `fast: Some(true)` selects the `/ship-fast` orchestrator |
 | `cancel_run(run_id)` / `cancel_all()` | Kill one / all in-flight runs |
 | `ship_agent(project, prompt, resume)` | The Shipper — `claude -p` locked to sonnet/medium, bypassPermissions, session-resumable |
+| `list_skills` / `read_skill` / `write_skill` / `create_skill` / `delete_skill` | Manage native Claude Code skills under `.claude/skills/<name>/SKILL.md` (path-guarded) |
 
 In-flight children live in a `RunState { children: Mutex<HashMap<String, Child>> }`, keyed by `run_id` (`"default"` for default mode, a unique slug per overnight run, `"shipper"` for the Shipper).
 
@@ -97,9 +98,11 @@ Claude-Foreman/
    ├─ src/lib.rs            Rust: commands, headless runner, worktrees, tray, claude resolution
    ├─ src/main.rs           entry → lib::run()
    ├─ templates/            the .claude assets installed into target repos:
-   │  ├─ planner.md  coder.md  tester.md  reviewer.md
+   │  ├─ planner.md  coder.md  tester.md  reviewer.md     the core (default) pipeline agents
+   │  ├─ fast-coder.md  fast-reviewer.md                   the fast pipeline's own independent agents
    │  ├─ ship.md            interactive orchestrator (with the Stage-0 confirmation gate)
    │  ├─ ship-auto.md       autonomous orchestrator (overnight — never pauses)
+   │  ├─ ship-fast.md       fast-path orchestrator (fast-coder → fast-reviewer; no planner/tester/gate)
    │  └─ settings.json      permissions.allow list pre-approving test/build commands
    ├─ capabilities/default.json   window permissions (covers "main" + "shipper")
    ├─ tauri.conf.json · Cargo.toml (tray-icon feature)
@@ -113,11 +116,13 @@ back to the embedded defaults.
 
 ---
 
-## 4. The three modes + the Shipper
+## 4. The modes + the Shipper
 
 Switched via the hamburger (☰, top-left); choice persists.
 
 - **Default** — one feature at a time, interactive. Uses `/ship`. Features: the crew with per-agent **model dropdowns** + **↻ re-run** buttons, a global **effort slider**, live **token** counts, the **confirmation gate** (the Planner always plays back its understanding + assumptions first — distinct blue popup), **interactive questions** (a genuine pause shows the amber reply box and resumes on your reply), and an optional **auto-fix** loop (on a non-SHIP verdict, resume up to N passes until SHIP).
+- **Fast** — the same interactive pane as Default, but runs two **independent** agents — `fast-coder` → `fast-reviewer` — via `/ship-fast`: no Planner, no Tester, **no confirmation gate**. These are their own `.claude/agents/fast-*.md` files (deliberately *not* the default coder/reviewer): the fast-coder implements straight from the request — no spec — and writes `changes.md`; the fast-reviewer judges against the request + `git diff` (no `test-results.md`) and writes `review.md` with the VERDICT. Same verdict/tokens/auto-fix/Shipper machinery as Default. Implemented as a `fastMode` flag over the Default pane that swaps in the fast crew cards (`#mode-default.fast` shows the `.fast-only` cards and hides the four default ones) and passes `fast: true` to `run_pipeline`. Agent membership: `ALL_AGENTS` (6) is what Foreman installs / lets you edit / set a model on / delegate to; `AGENTS` (the core 4) still gates default-mode `initialized`.
+- **Skills** — manage this repo's native **Claude Code skills** (`.claude/skills/<name>/SKILL.md`). A left list (name + description, click to edit, two-click 🗑 to delete) + an inline `SKILL.md` editor, with **＋ New** (slugged folder from a template). The `claude` CLI auto-discovers these; agents and the orchestrator can invoke them via the Skill tool. (The four built-in agents are left as-is for now — see roadmap; this is the library + authoring surface.)
 - **Parallelised — overnight** — queue many features; each runs in its own `git worktree` + branch, capped by an adjustable **concurrency** (default 2). Uses `/ship-auto` + `bypassPermissions` (autonomous, never pauses). A **runs list** shows each run's stage dots, verdict, tokens; finished runs get **⇪ Ship this** and **🗑 Discard** buttons.
 - **History** — past runs (both modes) with verdict + tokens + branch, persisted in `localStorage`, surviving relaunch.
 
@@ -135,23 +140,21 @@ The **Shipper** is a separate window (`shipper.html`), its own agent locked to *
 
 ## 6. Roadmap — what can still be implemented
 
-### ⭐ Fast mode (near-term priority)
-A streamlined, low-ceremony path for small/obvious changes — the heavyweight four-agent
-flow is overkill for a one-line fix. Exact shape is **TBD by the author**, but the intent
-is "ship trivial changes fast." Likely levers to choose from:
-- Skip the confirmation gate and the full spec; go straight to code → quick test.
-- Collapse stages (e.g. Coder + a light Tester only, or a single combined pass).
-- Force cheaper/faster settings (all-Sonnet or Haiku, low effort).
-- A dedicated `/ship-fast` orchestrator template + a mode/toggle in the UI.
-This belongs alongside Default / Overnight as a third *run* style (distinct from the
-History view). Reuses the existing runner, events, and resume machinery.
+### Recently shipped
+- **Fast mode** — Coder → Reviewer via `/ship-fast`, a `fastMode` flag over the Default pane (see §4). Done.
+- **Skills space** — in-app authoring of native `.claude/skills` (see §4). Done. Deferred follow-up: give the four built-in agents the `Skill` tool and extract their expertise into skills, so the pipeline itself runs on skills (the user chose "library now, extract later").
+
+### ⭐ Custom pipeline mode (next big lever)
+Let users define their own ordered list of agents (each effectively an agent + skill)
+instead of the fixed planner→coder→tester→reviewer. Full file-by-file plan in
+[`CUSTOM_PIPELINE_PLAN.md`](CUSTOM_PIPELINE_PLAN.md). Fast mode is effectively the first
+2-stage proof that "a pipeline is just a stage list."
 
 ### Other candidates
 - **In-app auto-updater** (Tauri updater + GitHub Releases) — true "download an app, it updates itself" for non-developers; needs a signing key, a CI release pipeline, and per-release version bumps. (Today's auto-update is the clone+rebuild launcher.)
 - **Windows port** — see [README §9](../README.md#9-porting-to-windows). Localized to `resolve_claude`/`which_login` (`#[cfg(windows)]`), the `.cmd` spawn, Windows install scripts, and a GitHub Actions matrix build.
 - **Shipper remote-action guardrail** — have the Shipper echo the exact `git push`/PR command and require an explicit "yes" before anything that touches a remote (it currently acts immediately under `bypassPermissions`).
 - **In-app diff viewer** — syntax-highlighted `git diff` per run, instead of dropping to a terminal.
-- **Per-stage timing** — how long each agent took, alongside tokens.
 - **Code-sign + notarize** the `.app` (no Gatekeeper warning; shareable) and a **Linux** build target.
 - **LICENSE** file (none yet).
 
