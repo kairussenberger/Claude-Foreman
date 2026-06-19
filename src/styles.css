@@ -516,3 +516,33 @@ textarea:focus, select:focus { outline: none; border-color: var(--accent); box-s
 .skill-del { flex: 0 0 auto; }
 .skills-editor-card { display: flex; flex-direction: column; }
 .skill-text { flex: 1 1 auto; min-height: 320px; font-family: var(--mono); font-size: 12.5px; }
+
+/* Custom mode: reuses the default pane with a dynamic, user-defined crew */
+#mode-default:not(.custom) #custom-crew,
+#mode-default:not(.custom) #custom-setup-card { display: none; }
+#mode-default.custom #pipeline-setup-card { display: none; }
+#mode-default.custom .crew > .agent,
+#mode-default.custom .crew > .flow { display: none; }
+#mode-default.custom #custom-crew { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; flex: 1 1 auto; min-height: 92px; }
+.custom-crew .agent.custom-agent { min-width: 104px; padding: 12px 10px; justify-content: center; gap: 8px; }
+.cs-verdict {
+  font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.4px; color: var(--accent);
+  background: var(--accent-soft); border-radius: 4px; padding: 1px 5px; margin-left: 4px;
+}
+.custom-stages { display: flex; flex-direction: column; gap: 6px; }
+.custom-stage-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px;
+}
+.cs-label { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.cs-idx {
+  flex: 0 0 auto; width: 18px; height: 18px; border-radius: 50%; background: var(--panel-2);
+  color: var(--muted); font-size: 11px; display: grid; place-items: center;
+}
+.cs-name { font-weight: 600; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cs-actions { display: inline-flex; gap: 4px; align-items: center; flex: 0 0 auto; }
+.cs-actions .model-select { font-size: 11px; }
+.ca-gen-row { gap: 6px; margin: 8px 0; }
+.ca-gen-row #ca-desc { flex: 1 1 auto; }
+#custom-agent-modal .ae-text { min-height: 260px; }
+#custom-agent-modal #ca-name { width: 200px; }

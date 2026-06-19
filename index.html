@@ -25,6 +25,7 @@
     <div id="menu" class="menu hidden">
       <button class="menu-item" data-mode="default">Default mode<small>plan → code → test → review</small></button>
       <button class="menu-item" data-mode="fast">Fast mode<small>coder → reviewer · skip planning</small></button>
+      <button class="menu-item" data-mode="custom">Custom<small>your own agents · handoff + verdict</small></button>
       <button class="menu-item" data-mode="parallel">Parallelised — overnight<small>queue many · own worktree each</small></button>
       <button class="menu-item" data-mode="history">History<small>past runs &amp; verdicts</small></button>
       <button class="menu-item" data-mode="skills">Skills<small>reusable .claude/skills · add your own</small></button>
@@ -194,11 +195,18 @@
             </div>
             <span class="agent-state">idle</span>
           </div>
+
+          <div id="custom-crew" class="custom-crew"></div>
         </section>
 
         <section class="workspace">
           <div class="col left">
-            <div class="card">
+            <div class="card" id="custom-setup-card">
+              <div class="card-title"><span>Custom pipeline</span><button id="custom-add" class="mini">＋ Add agent</button></div>
+              <p class="hint">Agents run top-to-bottom, handing off via <code>.pipeline/&lt;name&gt;.md</code>. The <strong>last</strong> agent renders the verdict.</p>
+              <div id="custom-stages" class="custom-stages"><p class="muted">No agents yet. ＋ Add agent to start.</p></div>
+            </div>
+            <div class="card" id="pipeline-setup-card">
               <div class="card-title">Pipeline setup</div>
               <div id="status-grid" class="status-grid"></div>
               <div class="row">
@@ -374,6 +382,25 @@
             <button id="ae-save" class="primary">Save</button>
             <button id="ae-cancel">Cancel</button>
             <span class="hint">Edits this repo's <code>.claude/agents/&lt;agent&gt;.md</code> — applies on the next run.</span>
+          </div>
+        </div>
+      </div>
+
+      <div id="custom-agent-modal" class="modal hidden">
+        <div class="modal-box">
+          <div class="modal-head"><span>Add a custom agent</span><button id="ca-close" class="mini">✕</button></div>
+          <label class="field">Name (slug)
+            <input id="ca-name" placeholder="e.g. researcher" spellcheck="false" />
+          </label>
+          <div class="row ca-gen-row">
+            <input id="ca-desc" placeholder="Describe the agent's role, then Generate (optional)" spellcheck="false" />
+            <button id="ca-generate">✨ Generate</button>
+          </div>
+          <textarea id="ca-text" class="ae-text" spellcheck="false" placeholder="Write the agent's instruction .md here — or describe it above and Generate. It reads prior .pipeline/*.md files and writes .pipeline/&lt;name&gt;.md."></textarea>
+          <div class="row">
+            <button id="ca-save" class="primary">Add to pipeline</button>
+            <button id="ca-cancel">Cancel</button>
+            <span id="ca-status" class="skill-status"></span>
           </div>
         </div>
       </div>

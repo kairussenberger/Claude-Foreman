@@ -1,6 +1,6 @@
 # Implementation Plan — Custom Pipeline Mode
 
-**Status:** planned (not started). Authored 2026-06-19.
+**Status:** MVP shipped 2026-06-19 on branch `feature/custom-pipeline` (a lean version of this plan — see `ARCHITECTURE.md` §4 Custom). This doc remains the reference for the fuller vision (uniform STATUS line, JSON-driven generic orchestrator) and the deferred polish.
 **Goal:** let a user define their *own* pipeline — an ordered list of agents, each with its
 own `.md` prompt and model — instead of being locked to the built-in
 `planner → coder → tester → reviewer`. Agents already hand off through `.pipeline/*.md`,

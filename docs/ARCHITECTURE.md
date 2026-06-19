@@ -60,6 +60,8 @@ when asked.
 | `ship_agent(project, prompt, resume)` | The Shipper — `claude -p` locked to sonnet/medium, bypassPermissions, session-resumable |
 | `list_skills` / `read_skill` / `write_skill` / `create_skill` / `delete_skill` | Manage native Claude Code skills under `.claude/skills/<name>/SKILL.md` (path-guarded) |
 | `build_skill(project, prompt)` | The Skill Builder — a `claude -p` agent (sonnet/medium, bypassPermissions, scoped to `.claude/skills/`) that authors a whole skill folder (SKILL.md + any scripts/references) from a prompt. Keyed `"skill-builder"` |
+| `read_custom_pipeline` / `write_custom_pipeline(project, agents)` | Read / persist the ordered custom pipeline (`.claude/foreman-pipeline.json`); writing also regenerates the `/ship-custom` orchestrator |
+| `build_agent(project, name, prompt)` | The Agent Builder — a `claude -p` agent (sonnet/medium, bypassPermissions) that authors one `.claude/agents/<name>.md` from a description. Keyed `"agent-builder"` |
 
 In-flight children live in a `RunState { children: Mutex<HashMap<String, Child>> }`, keyed by `run_id` (`"default"` for default mode, a unique slug per overnight run, `"shipper"` for the Shipper).
 
@@ -123,6 +125,7 @@ Switched via the hamburger (☰, top-left); choice persists.
 
 - **Default** — one feature at a time, interactive. Uses `/ship`. Features: the crew with per-agent **model dropdowns** + **↻ re-run** buttons, a global **effort slider**, live **token** counts, the **confirmation gate** (the Planner always plays back its understanding + assumptions first — distinct blue popup), **interactive questions** (a genuine pause shows the amber reply box and resumes on your reply), and an optional **auto-fix** loop (on a non-SHIP verdict, resume up to N passes until SHIP).
 - **Fast** — the same interactive pane as Default, but runs two **independent** agents — `fast-coder` → `fast-reviewer` — via `/ship-fast`: no Planner, no Tester, **no confirmation gate**. These are their own `.claude/agents/fast-*.md` files (deliberately *not* the default coder/reviewer): the fast-coder implements straight from the request — no spec — and writes `changes.md`; the fast-reviewer judges against the request + `git diff` (no `test-results.md`) and writes `review.md` with the VERDICT. Same verdict/tokens/auto-fix/Shipper machinery as Default. Implemented as a `fastMode` flag over the Default pane that swaps in the fast crew cards (`#mode-default.fast` shows the `.fast-only` cards and hides the four default ones) and passes `fast: true` to `run_pipeline`. Agent membership: `ALL_AGENTS` (6) is what Foreman installs / lets you edit / set a model on / delegate to; `AGENTS` (the core 4) still gates default-mode `initialized`.
+- **Custom** — a user-defined pipeline of arbitrary agents (reuses the Default pane, like Fast). The left panel becomes a stage list (per-stage model, ↑/↓ reorder, ✎ edit, 🗑 remove) with **＋ Add agent**: write the instruction `.md` by hand, or describe it and have `build_agent` author it. Agents are real `.claude/agents/<slug>.md`; the order persists to `.claude/foreman-pipeline.json`; Rust regenerates a concrete `/ship-custom` orchestrator on every change (so the agent never parses JSON). Each stage hands off via `.pipeline/<slug>.md`, may read all earlier handoff files, and the **last** stage is told to emit `VERDICT: SHIP | NEEDS WORK | BLOCK`. Runs are full-interactive (questions + verdict + auto-fix), no planner gate. Backend generalizations that made this possible: `run_pipeline` computes its watched stages + verdict file **per run** (custom = one `.pipeline/<slug>.md` per stage, last carries the verdict), the "stage running" detection accepts any delegated subagent name, and agent read/write/model commands validate a safe slug rather than a fixed membership list. Only mandatory contract: stages hand off via files and the last renders a verdict — names/roles are fully variable.
 - **Skills** — manage this repo's native **Claude Code skills** (`.claude/skills/<name>/SKILL.md`). A left list (name + description, click to edit, two-click 🗑 to delete) + an inline `SKILL.md` editor, with **＋ New** (slugged folder from a template). **Lint-on-Save** soft-warns (amber status line) when a saved skill won't trigger — placeholder/empty/missing `description`, broken frontmatter, or `name` ≠ folder. A **Skill Builder** panel (`build_skill`) lets you describe a skill and have an agent author the whole folder — SKILL.md **plus** any `scripts/`/`references/`/`assets/` it needs, with correct cross-references — straight into `.claude/skills/`, then it appears in the list to edit. The `claude` CLI auto-discovers these; agents and the orchestrator invoke them via the Skill tool. (The four built-in pipeline agents are left as-is for now — see roadmap; this is the library + authoring surface.)
 - **Parallelised — overnight** — queue many features; each runs in its own `git worktree` + branch, capped by an adjustable **concurrency** (default 2). Uses `/ship-auto` + `bypassPermissions` (autonomous, never pauses). A **runs list** shows each run's stage dots, verdict, tokens; finished runs get **⇪ Ship this** and **🗑 Discard** buttons.
 - **History** — past runs (both modes) with verdict + tokens + branch, persisted in `localStorage`, surviving relaunch.
@@ -145,11 +148,12 @@ The **Shipper** is a separate window (`shipper.html`), its own agent locked to *
 - **Fast mode** — Coder → Reviewer via `/ship-fast`, a `fastMode` flag over the Default pane (see §4). Done.
 - **Skills space** — in-app authoring of native `.claude/skills` (see §4). Done. Deferred follow-up: give the four built-in agents the `Skill` tool and extract their expertise into skills, so the pipeline itself runs on skills (the user chose "library now, extract later").
 
-### ⭐ Custom pipeline mode (next big lever)
-Let users define their own ordered list of agents (each effectively an agent + skill)
-instead of the fixed planner→coder→tester→reviewer. Full file-by-file plan in
-[`CUSTOM_PIPELINE_PLAN.md`](CUSTOM_PIPELINE_PLAN.md). Fast mode is effectively the first
-2-stage proof that "a pipeline is just a stage list."
+### Custom pipeline mode — MVP shipped (branch `feature/custom-pipeline`)
+A user-defined ordered list of arbitrary agents that hand off via files, with the last
+rendering a verdict — see §4 **Custom**. Built from the lean spec in
+[`CUSTOM_PIPELINE_PLAN.md`](CUSTOM_PIPELINE_PLAN.md). Deferred polish: fancier crew figures,
+per-stage verdict designation (currently always the last stage), overnight/worktree runs for
+custom pipelines, and saved/named pipelines.
 
 ### Other candidates
 - **In-app auto-updater** (Tauri updater + GitHub Releases) — true "download an app, it updates itself" for non-developers; needs a signing key, a CI release pipeline, and per-release version bumps. (Today's auto-update is the clone+rebuild launcher.)

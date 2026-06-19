@@ -352,8 +352,8 @@ fn classify(line: &str) -> (String, String) {
 /// Parse the verdict from the `VERDICT:` line in review.md. Only the text *after*
 /// `VERDICT:` on that line is inspected — scanning the whole document would falsely
 /// match words like "blocking" or "needs" that appear in the review's prose.
-fn read_verdict(project: &str) -> Option<String> {
-    let txt = fs::read_to_string(Path::new(project).join(".pipeline/review.md")).ok()?;
+fn read_verdict(project: &str, file: &str) -> Option<String> {
+    let txt = fs::read_to_string(Path::new(project).join(".pipeline").join(file)).ok()?;
     for line in txt.lines() {
         let upper = line.to_uppercase();
         let Some(idx) = upper.find("VERDICT:") else {
@@ -500,9 +500,7 @@ fn pipeline_status(project: String) -> Result<PipelineStatus, String> {
 /// (2) Set the model for one agent by rewriting its frontmatter `model:` line.
 #[tauri::command]
 fn set_agent_model(project: String, agent: String, model: String) -> Result<(), String> {
-    if !ALL_AGENTS.contains(&agent.as_str()) {
-        return Err(format!("unknown agent: {agent}"));
-    }
+    valid_agent_name(&agent)?;
     if !ALLOWED_MODELS.contains(&model.as_str()) {
         return Err(format!("unsupported model: {model}"));
     }
@@ -538,9 +536,7 @@ fn set_agent_model(project: String, agent: String, model: String) -> Result<(), 
 /// (Config) Read a full agent prompt file for in-app editing.
 #[tauri::command]
 fn read_agent_file(project: String, agent: String) -> Result<String, String> {
-    if !ALL_AGENTS.contains(&agent.as_str()) {
-        return Err(format!("unknown agent: {agent}"));
-    }
+    valid_agent_name(&agent)?;
     let p = PathBuf::from(&project).join(format!(".claude/agents/{agent}.md"));
     fs::read_to_string(&p).map_err(|e| e.to_string())
 }
@@ -548,9 +544,7 @@ fn read_agent_file(project: String, agent: String) -> Result<String, String> {
 /// (Config) Write an edited agent prompt file back to the repo.
 #[tauri::command]
 fn write_agent_file(project: String, agent: String, content: String) -> Result<(), String> {
-    if !ALL_AGENTS.contains(&agent.as_str()) {
-        return Err(format!("unknown agent: {agent}"));
-    }
+    valid_agent_name(&agent)?;
     let p = PathBuf::from(&project).join(format!(".claude/agents/{agent}.md"));
     fs::write(&p, content).map_err(|e| e.to_string())
 }
@@ -718,6 +712,105 @@ fn delete_skill(project: String, name: String) -> Result<(), String> {
     fs::remove_dir_all(&dir).map_err(|e| e.to_string())
 }
 
+// --- Custom pipeline: a user-defined, ordered list of agents that hand off via .pipeline/. ---
+
+/// A safe agent/stage slug: non-empty, no path separators or traversal.
+fn valid_agent_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err(format!("invalid agent name: {name}"));
+    }
+    Ok(())
+}
+
+/// The ordered agent slugs of the repo's custom pipeline (`.claude/foreman-pipeline.json`).
+fn load_custom_stages(root: &Path) -> Vec<String> {
+    let Ok(txt) = fs::read_to_string(root.join(".claude/foreman-pipeline.json")) else {
+        return Vec::new();
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&txt) else {
+        return Vec::new();
+    };
+    v.get("stages")
+        .and_then(|s| s.as_array())
+        .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default()
+}
+
+/// Generate the `/ship-custom` orchestrator from the ordered stage list (last stage = verdict).
+/// Regenerated whenever the pipeline is written, so the agent never has to parse JSON.
+fn generate_ship_custom(agents: &[String]) -> String {
+    if agents.is_empty() {
+        return "---\ndescription: Custom pipeline (no stages defined yet).\nargument-hint: <request>\n---\n\nNo custom pipeline stages are defined yet. Add agents in Foreman's Custom mode first.\n".to_string();
+    }
+    let chain = agents.join(" → ");
+    let mut s = format!(
+        "---\ndescription: Run the custom pipeline ({chain}) for a request, handing off through .pipeline/.\nargument-hint: <request>\n---\n\nRun the custom feature pipeline for: $ARGUMENTS\n\nExecute these stages IN ORDER. Do the work through the subagents — do not do it yourself. After each stage, confirm its handoff file exists before starting the next. Each agent may read any earlier `.pipeline/*.md` handoff file; it writes only its own.\n\n"
+    );
+    let last = agents.len() - 1;
+    for (i, a) in agents.iter().enumerate() {
+        let n = i + 1;
+        let ctx = if i == 0 {
+            ", passing it the request verbatim: \"$ARGUMENTS\"".to_string()
+        } else {
+            let p: Vec<String> = agents[..i].iter().map(|x| format!("`.pipeline/{x}.md`")).collect();
+            format!(" (it may read {})", p.join(", "))
+        };
+        if i == last {
+            s.push_str(&format!("{n}. Delegate to the `{a}` subagent{ctx}. It writes `.pipeline/{a}.md` and **must end that file with a line** `VERDICT: SHIP | NEEDS WORK | BLOCK`. Then show me the full contents of `.pipeline/{a}.md`.\n"));
+        } else {
+            s.push_str(&format!("{n}. Delegate to the `{a}` subagent{ctx}. It writes `.pipeline/{a}.md`. Wait for that file. If it is genuinely blocked or has a real question for me, STOP and show me.\n"));
+        }
+    }
+    s.push_str(&format!("\nFinally, report the VERDICT from `.pipeline/{}.md` (SHIP / NEEDS WORK / BLOCK).\n\n**Do not merge, commit, or push anything.** Leave the changes for my review.\n", agents[last]));
+    s
+}
+
+#[derive(Serialize)]
+struct CustomStage {
+    agent: String,
+    present: bool,
+    model: Option<String>,
+    file: String,
+}
+
+/// (Custom) Read the ordered pipeline, with each stage's model + whether its agent file exists.
+#[tauri::command]
+fn read_custom_pipeline(project: String) -> Result<Vec<CustomStage>, String> {
+    let root = PathBuf::from(&project);
+    Ok(load_custom_stages(&root)
+        .into_iter()
+        .map(|s| {
+            let p = root.join(format!(".claude/agents/{s}.md"));
+            let present = p.exists();
+            CustomStage {
+                model: if present { read_agent_model(&p) } else { None },
+                file: format!("{s}.md"),
+                present,
+                agent: s,
+            }
+        })
+        .collect())
+}
+
+/// (Custom) Persist the ordered stage list + (re)generate the /ship-custom orchestrator.
+#[tauri::command]
+fn write_custom_pipeline(project: String, agents: Vec<String>) -> Result<(), String> {
+    for a in &agents {
+        valid_agent_name(a)?;
+    }
+    let root = PathBuf::from(&project);
+    fs::create_dir_all(root.join(".claude/commands")).map_err(|e| e.to_string())?;
+    let json = serde_json::json!({ "stages": agents });
+    fs::write(
+        root.join(".claude/foreman-pipeline.json"),
+        serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    fs::write(root.join(".claude/commands/ship-custom.md"), generate_ship_custom(&agents))
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// (4) Create an isolated git worktree + branch for an overnight run, and install the
 /// agent scaffold into it (a fresh worktree won't contain untracked .claude/agents).
 #[tauri::command]
@@ -801,6 +894,7 @@ fn run_pipeline(
     resume: Option<String>,
     clean_first: bool,
     fast: Option<bool>,
+    custom: Option<bool>,
 ) -> Result<(), String> {
     let root = PathBuf::from(&project);
     if !root.is_dir() {
@@ -818,10 +912,21 @@ fn run_pipeline(
     let mode = valid_permission_mode(&permission_mode).to_string();
     let command = if autonomous {
         "ship-auto"
+    } else if custom.unwrap_or(false) {
+        "ship-custom"
     } else if fast.unwrap_or(false) {
         "ship-fast"
     } else {
         "ship"
+    };
+    // Stages to watch + which handoff file carries the verdict. Custom runs are dynamic:
+    // one file per stage, named after the agent; the LAST stage carries the verdict.
+    let (stages, verdict_file): (Vec<(String, String)>, String) = if custom.unwrap_or(false) {
+        let slugs = load_custom_stages(&root);
+        let vf = slugs.last().map(|s| format!("{s}.md")).unwrap_or_else(|| "review.md".into());
+        (slugs.iter().map(|s| (s.clone(), format!("{s}.md"))).collect(), vf)
+    } else {
+        (STAGES.iter().map(|(a, f)| (a.to_string(), f.to_string())).collect(), "review.md".into())
     };
     // Fresh run → `/ship[-auto] <request>`; resumed run → send the human's answer verbatim.
     let prompt = match &resume {
@@ -902,7 +1007,7 @@ fn run_pipeline(
                                         if let Some(sub) =
                                             block.pointer("/input/subagent_type").and_then(|x| x.as_str())
                                         {
-                                            if ALL_AGENTS.contains(&sub) {
+                                            if !sub.is_empty() {
                                                 let _ = app.emit(
                                                     "pipeline-stage",
                                                     StageEvent {
@@ -973,21 +1078,21 @@ fn run_pipeline(
     let watch_project = project.clone();
     let rid = run_id.clone();
     thread::spawn(move || {
-        let mut seen = [false; 4];
+        let mut seen = vec![false; stages.len()];
         let emit_stage = |i: usize| {
-            let (agent, file) = STAGES[i];
+            let (agent, file) = &stages[i];
             let _ = watch_app.emit(
                 "pipeline-stage",
                 StageEvent {
                     run_id: rid.clone(),
-                    agent: agent.to_string(),
-                    file: file.to_string(),
+                    agent: agent.clone(),
+                    file: file.clone(),
                     phase: "done".into(),
                 },
             );
         };
         loop {
-            for (i, (_, file)) in STAGES.iter().enumerate() {
+            for (i, (_, file)) in stages.iter().enumerate() {
                 if !seen[i] && Path::new(&watch_project).join(".pipeline").join(file).exists() {
                     seen[i] = true;
                     emit_stage(i);
@@ -1006,12 +1111,12 @@ fn run_pipeline(
             if let Some(code) = finished {
                 map.remove(&rid);
                 drop(map);
-                for (i, (_, file)) in STAGES.iter().enumerate() {
+                for (i, (_, file)) in stages.iter().enumerate() {
                     if !seen[i] && Path::new(&watch_project).join(".pipeline").join(file).exists() {
                         emit_stage(i);
                     }
                 }
-                let verdict = read_verdict(&watch_project);
+                let verdict = read_verdict(&watch_project, &verdict_file);
                 let _ = watch_app.emit("pipeline-done", DoneEvent { run_id: rid.clone(), code, verdict });
                 break;
             }
@@ -1327,6 +1432,131 @@ fn build_skill(app: AppHandle, state: State<RunState>, project: String, prompt: 
     Ok(())
 }
 
+// --- Agent Builder: authors a single custom-pipeline subagent file from a description. ---
+
+const AGENT_BUILDER_PREAMBLE: &str = "You are the Agent Builder for Foreman's custom pipeline — you author ONE Claude Code subagent definition file.\n\nThe subagent lives at `.claude/agents/<name>.md` with YAML frontmatter:\n- `name:` — exactly the slug you are given.\n- `description:` — one line on what this agent does in the pipeline.\n- `tools:` — only the tools it needs (e.g. Read, Write, Edit, Grep, Glob, Bash). A read-only reviewer should NOT list Edit.\n- `model:` — sonnet, unless the role clearly needs more.\n...followed by a clear system prompt: the agent's role, how it works, and the exact output it produces.\n\nThis agent is ONE stage of a file-handoff pipeline. There is NO planner and NO `.pipeline/spec.md` — the human's request is delivered by the orchestrator when it delegates (the FIRST stage works directly from that request; later stages also receive the earlier stages' handoff files). Its instructions MUST tell it to:\n- Use the request it is given, and read any earlier `.pipeline/*.md` handoff files relevant to its job. Do NOT assume a `.pipeline/spec.md` file exists.\n- Do its work, then write its result to `.pipeline/<name>.md` in a clear, structured format.\n- Stay strictly in its lane — one job.\n\nWrite ONLY `.claude/agents/<name>.md` (create or overwrite that single file). Do not modify anything else, and never commit or push. When done, report the agent name and a one-line summary of its role.";
+
+/// Run the Agent Builder (sonnet/medium, bypassPermissions) to author `.claude/agents/<name>.md`
+/// from a description. Keyed "agent-builder"; streams agentbuild-log / agentbuild-done.
+#[tauri::command]
+fn build_agent(app: AppHandle, state: State<RunState>, project: String, name: String, prompt: String) -> Result<(), String> {
+    valid_agent_name(&name)?;
+    let root = PathBuf::from(&project);
+    if !root.is_dir() {
+        return Err(format!("Not a directory: {project}"));
+    }
+    if state.children.lock().unwrap().contains_key("agent-builder") {
+        return Err("the agent builder is already working".into());
+    }
+    fs::create_dir_all(root.join(".claude/agents")).map_err(|e| e.to_string())?;
+    let claude = resolve_claude();
+    let full_prompt = format!(
+        "{AGENT_BUILDER_PREAMBLE}\n\nThe agent's slug (file name and frontmatter `name`) is: {name}\n\nAuthor this agent for the following role: {prompt}"
+    );
+
+    let mut cmd = Command::new(&claude);
+    cmd.current_dir(&root)
+        .arg("-p")
+        .arg(&full_prompt)
+        .arg("--model")
+        .arg("sonnet")
+        .arg("--effort")
+        .arg("medium")
+        .arg("--permission-mode")
+        .arg("bypassPermissions")
+        .arg("--output-format")
+        .arg("stream-json")
+        .arg("--verbose")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to launch claude ({claude}): {e}"))?;
+
+    if let Some(stdout) = child.stdout.take() {
+        let app = app.clone();
+        thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let v: Value = match serde_json::from_str(&line) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                match v.get("type").and_then(|x| x.as_str()).unwrap_or("") {
+                    "assistant" => {
+                        if let Some(content) = v.pointer("/message/content").and_then(|c| c.as_array()) {
+                            for block in content {
+                                match block.get("type").and_then(|x| x.as_str()) {
+                                    Some("text") => {
+                                        if let Some(t) = block.get("text").and_then(|x| x.as_str()) {
+                                            let t = t.trim();
+                                            if !t.is_empty() {
+                                                let _ = app.emit(
+                                                    "agentbuild-log",
+                                                    ShipperEvent { kind: "assistant".into(), text: t.to_string() },
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Some("tool_use") => {
+                                        let nm = block.get("name").and_then(|x| x.as_str()).unwrap_or("tool");
+                                        let _ = app.emit(
+                                            "agentbuild-log",
+                                            ShipperEvent { kind: "tool".into(), text: format!("⚙ {nm}") },
+                                        );
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    "result" => {
+                        if let Some(r) = v.get("result").and_then(|x| x.as_str()) {
+                            let _ = app.emit("agentbuild-log", ShipperEvent { kind: "result".into(), text: r.to_string() });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        });
+    }
+    if let Some(stderr) = child.stderr.take() {
+        let app = app.clone();
+        thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                if !line.trim().is_empty() {
+                    let _ = app.emit("agentbuild-log", ShipperEvent { kind: "stderr".into(), text: line });
+                }
+            }
+        });
+    }
+
+    state.children.lock().unwrap().insert("agent-builder".into(), child);
+
+    let children = state.children.clone();
+    let done_app = app.clone();
+    thread::spawn(move || loop {
+        let mut map = children.lock().unwrap();
+        let finished = match map.get_mut("agent-builder") {
+            Some(c) => matches!(c.try_wait(), Ok(Some(_)) | Err(_)),
+            None => true,
+        };
+        if finished {
+            map.remove("agent-builder");
+            drop(map);
+            let _ = done_app.emit("agentbuild-done", ());
+            break;
+        }
+        drop(map);
+        thread::sleep(Duration::from_millis(300));
+    });
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1375,7 +1605,10 @@ pub fn run() {
             write_skill,
             create_skill,
             delete_skill,
-            build_skill
+            build_skill,
+            read_custom_pipeline,
+            write_custom_pipeline,
+            build_agent
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

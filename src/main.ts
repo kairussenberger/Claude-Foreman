@@ -34,10 +34,10 @@ type UsageEvent = {
   is_final: boolean;
 };
 type SessionEvent = { run_id: string; session_id: string };
-type AppMode = "default" | "fast" | "parallel" | "history" | "skills";
+type AppMode = "default" | "fast" | "custom" | "parallel" | "history" | "skills";
 type HistoryEntry = {
   time: number;
-  mode: "default" | "parallel" | "fast";
+  mode: "default" | "parallel" | "fast" | "custom";
   repo: string;
   request: string;
   verdict: string | null;
@@ -86,6 +86,29 @@ const FAST_AUTOFIX_PROMPT =
   "delegate to the fast-coder to fix them, then the fast-reviewer to re-review and rewrite " +
   ".pipeline/review.md with an updated verdict. Work autonomously — do not ask me anything; " +
   "make the best decision and proceed to a new verdict.";
+const CUSTOM_AUTOFIX_PROMPT =
+  "The verdict was not SHIP. Read the verdict handoff file and address EVERY finding: re-run the " +
+  "relevant pipeline stages to fix them, then have the final stage re-render an updated VERDICT line. " +
+  "Work autonomously — do not ask me anything; make the best decision and proceed to a new verdict.";
+const CUSTOM_COLORS = ["#3f6fd1", "#4f9a4f", "#9b59b6", "#c47a2c", "#1f9e8b", "#d9772e", "#c0508a", "#5f6caf"];
+const DEFAULT_AGENT_TEMPLATE = `---
+name: <name>
+description: One line on what this stage does and when it runs.
+tools: Read, Write, Edit, Grep, Glob, Bash
+model: sonnet
+---
+
+You are one stage of a file-handoff pipeline.
+
+## Process
+1. Read any relevant prior handoff files in .pipeline/.
+2. Do your job (describe it here).
+3. Write your result to .pipeline/<name>.md in a clear, structured format.
+
+## Rules
+- Stay strictly in your lane — one job.
+- Write only .pipeline/<name>.md.
+`;
 const STAGE_RERUN: Record<string, string> = {
   planner: "Re-run ONLY the planner stage: re-read the codebase and rewrite .pipeline/spec.md. Do not run the other stages.",
   coder: "Re-run ONLY the coder stage: re-implement against the current .pipeline/spec.md and rewrite .pipeline/changes.md. Do not run the other stages.",
@@ -111,9 +134,13 @@ let running = false; // default-mode single run
 let activeFile: string | null = null;
 let sessionTokens = Number(localStorage.getItem("foreman.sessionTokens") || "0");
 const savedMode = localStorage.getItem("foreman.mode");
-const KNOWN_MODES = ["default", "fast", "parallel", "history", "skills"];
+const KNOWN_MODES = ["default", "fast", "custom", "parallel", "history", "skills"];
 let appMode: AppMode = (KNOWN_MODES.includes(savedMode || "") ? savedMode : "default") as AppMode;
 let fastMode = appMode === "fast"; // fast = default pane, Coder→Reviewer only
+let customMode = appMode === "custom"; // custom = default pane, user-defined agents
+let customStages: string[] = []; // ordered slugs of the current custom pipeline
+let customModels: Record<string, string | null> = {};
+let pendingGenName: string | null = null; // agent slug being authored by build_agent
 let defaultSessionId: string | null = null; // for resuming a paused default-mode run
 let defaultRequest = "";
 let defaultRunTokens = 0;
@@ -154,6 +181,7 @@ function setProject(path: string) {
   refreshStatus();
   renderDoctor();
   if (appMode === "skills") renderSkills();
+  if (appMode === "custom") void loadCustomPipeline().then(renderCustom);
 }
 
 // ---- Status (default mode) ----
@@ -184,8 +212,8 @@ function renderStatus(status: PipelineStatus) {
   cmd.className = `chip ${status.has_ship_command ? "ok" : "miss"}`;
   cmd.textContent = `${status.has_ship_command ? "✓" : "○"} /ship`;
   grid.appendChild(cmd);
-  ($("run-btn") as HTMLButtonElement).disabled = !status.initialized || running;
-  renderFileTabs(status.handoffs);
+  ($("run-btn") as HTMLButtonElement).disabled = customMode ? !customStages.length || running : !status.initialized || running;
+  if (!customMode) renderFileTabs(status.handoffs);
 }
 
 // ---- Config: per-project profiles, preflight doctor, agent-prompt editor ----
@@ -250,6 +278,10 @@ async function saveAgentEditor() {
     appendLog({ run_id: DEFAULT_RUN, kind: "system", text: `saved ${editingAgent}.md`, raw: "" });
     closeAgentEditor();
     refreshStatus(); // model dropdown may have changed if frontmatter was edited
+    if (customMode) {
+      await loadCustomPipeline();
+      renderCustom();
+    }
   } catch (e) {
     appendLog({ run_id: DEFAULT_RUN, kind: "stderr", text: `save error: ${e}`, raw: "" });
   }
@@ -282,6 +314,10 @@ async function initPipeline() {
 // ---- Default-mode run ----
 async function runPipeline() {
   if (!project || running) return;
+  if (customMode && !customStages.length) {
+    appendLog({ run_id: DEFAULT_RUN, kind: "stderr", text: "add at least one agent to the custom pipeline first", raw: "" });
+    return;
+  }
   const request = ($("request") as HTMLTextAreaElement).value.trim();
   if (!request) {
     ($("request") as HTMLTextAreaElement).focus();
@@ -299,13 +335,13 @@ async function runPipeline() {
   defaultSessionId = null;
   defaultRequest = request;
   defaultRunTokens = 0;
-  awaitingConfirmation = !fastMode; // fast mode skips the Planner's confirmation gate
+  awaitingConfirmation = !fastMode && !customMode; // only default mode has the Planner gate
   autoFixRemaining = ($("autofix") as HTMLInputElement).checked
     ? Math.max(1, Math.min(3, Number(($("autofix-passes") as HTMLInputElement).value) || 1))
     : 0;
   if (clean_first) $("log").innerHTML = "";
   setRunning(true);
-  setStageState(fastMode ? "fast-coder" : "planner", "running");
+  setStageState(fastMode ? "fast-coder" : customMode ? customStages[0] : "planner", "running");
 
   try {
     await invoke("run_pipeline", {
@@ -318,8 +354,9 @@ async function runPipeline() {
       resume: null,
       cleanFirst: clean_first,
       fast: fastMode,
+      custom: customMode,
     });
-    appendLog({ run_id: DEFAULT_RUN, kind: "system", text: `▶ ${fastMode ? "fast-" : ""}shipping (effort: ${effort}): ${request}`, raw: "" });
+    appendLog({ run_id: DEFAULT_RUN, kind: "system", text: `▶ ${customMode ? "custom-" : fastMode ? "fast-" : ""}shipping (effort: ${effort}): ${request}`, raw: "" });
   } catch (e) {
     appendLog({ run_id: DEFAULT_RUN, kind: "stderr", text: `run error: ${e}`, raw: "" });
     setRunning(false);
@@ -342,12 +379,13 @@ function setRunning(state: boolean) {
   document.querySelectorAll<HTMLSelectElement>(".model-select").forEach((s) => {
     if (state) s.disabled = true;
   });
+  if (customMode) renderCustomStages(); // re-sync the custom model selects' enabled state
   updateRerunButtons();
 }
 
 // ---- Default-mode stages ----
 function resetStages() {
-  for (const agent of ALL_STAGE_CARDS) setStageState(agent, "idle");
+  for (const agent of [...ALL_STAGE_CARDS, ...customStages]) setStageState(agent, "idle");
 }
 function setStageState(agent: string, state: StageState) {
   const el = document.querySelector<HTMLElement>(`#mode-default .agent[data-agent="${agent}"]`);
@@ -506,7 +544,7 @@ function defaultDone(p: DoneEvent) {
   }
   recordRun({
     time: Date.now(),
-    mode: fastMode ? "fast" : "default",
+    mode: customMode ? "custom" : fastMode ? "fast" : "default",
     repo: project || "",
     request: defaultRequest,
     verdict: p.verdict,
@@ -530,7 +568,7 @@ function runAutoFix(verdict: string | null) {
   invoke("run_pipeline", {
     runId: DEFAULT_RUN,
     project,
-    request: fastMode ? FAST_AUTOFIX_PROMPT : AUTOFIX_PROMPT,
+    request: customMode ? CUSTOM_AUTOFIX_PROMPT : fastMode ? FAST_AUTOFIX_PROMPT : AUTOFIX_PROMPT,
     permissionMode: ($("perm-mode") as HTMLSelectElement).value,
     effort: currentEffort(),
     autonomous: false,
@@ -1170,14 +1208,216 @@ async function cancelSkillBuild() {
   writeLogLine($("skillbuild-log"), "system", "■ cancelled");
 }
 
+// ---- Custom mode (a user-defined pipeline of arbitrary agents) ----
+function colorFor(i: number): string {
+  return CUSTOM_COLORS[i % CUSTOM_COLORS.length];
+}
+async function loadCustomPipeline() {
+  if (!project) {
+    customStages = [];
+    customModels = {};
+    return;
+  }
+  try {
+    const stages = await invoke<{ agent: string; present: boolean; model: string | null; file: string }[]>("read_custom_pipeline", { project });
+    customStages = stages.map((s) => s.agent);
+    customModels = {};
+    for (const s of stages) customModels[s.agent] = s.model;
+  } catch {
+    customStages = [];
+    customModels = {};
+  }
+}
+function miniBtn(txt: string, fn: () => void, disabled = false): HTMLButtonElement {
+  const b = document.createElement("button");
+  b.className = "mini";
+  b.textContent = txt;
+  b.disabled = disabled;
+  b.onclick = fn;
+  return b;
+}
+function renderCustomCrew() {
+  const wrap = $("custom-crew");
+  wrap.innerHTML = "";
+  if (!customStages.length) {
+    wrap.innerHTML = `<p class="muted" style="margin:auto">No agents yet — add them in the left panel.</p>`;
+    return;
+  }
+  customStages.forEach((slug, i) => {
+    if (i > 0) {
+      const flow = document.createElement("div");
+      flow.className = "flow";
+      flow.textContent = "→";
+      wrap.appendChild(flow);
+    }
+    const card = document.createElement("div");
+    card.className = "agent custom-agent";
+    card.dataset.agent = slug;
+    card.style.setProperty("--c", colorFor(i));
+    const last = i === customStages.length - 1;
+    card.innerHTML =
+      `<div class="agent-meta"><span class="agent-name">${escapeHtml(slug)}</span>${last ? '<span class="cs-verdict">verdict</span>' : ""}</div>` +
+      `<span class="agent-state">idle</span>`;
+    wrap.appendChild(card);
+  });
+}
+function renderCustomStages() {
+  const list = $("custom-stages");
+  if (!project) {
+    list.innerHTML = `<p class="muted">Select a repo first.</p>`;
+    return;
+  }
+  if (!customStages.length) {
+    list.innerHTML = `<p class="muted">No agents yet. ＋ Add agent to start.</p>`;
+    return;
+  }
+  list.innerHTML = "";
+  customStages.forEach((slug, i) => {
+    const last = i === customStages.length - 1;
+    const row = document.createElement("div");
+    row.className = "custom-stage-row";
+    const label = document.createElement("div");
+    label.className = "cs-label";
+    label.innerHTML = `<span class="cs-idx">${i + 1}</span><span class="cs-name">${escapeHtml(slug)}</span>${last ? '<span class="cs-verdict">verdict</span>' : ""}`;
+    const actions = document.createElement("span");
+    actions.className = "cs-actions";
+    const sel = document.createElement("select");
+    sel.className = "model-select";
+    sel.title = "Model";
+    sel.innerHTML = `<option value="opus">Opus</option><option value="sonnet">Sonnet</option><option value="haiku">Haiku</option><option value="fable">Fable</option><option value="inherit">Inherit</option>`;
+    const m = (customModels[slug] || "").toLowerCase();
+    if (m && Array.from(sel.options).some((o) => o.value === m)) sel.value = m;
+    sel.disabled = running;
+    sel.onchange = () => {
+      if (project) invoke("set_agent_model", { project, agent: slug, model: sel.value }).catch((e) => appendLog({ run_id: DEFAULT_RUN, kind: "stderr", text: `set model: ${e}`, raw: "" }));
+    };
+    actions.appendChild(sel);
+    actions.appendChild(miniBtn("↑", () => moveStage(i, -1), i === 0));
+    actions.appendChild(miniBtn("↓", () => moveStage(i, 1), last));
+    actions.appendChild(miniBtn("✎", () => openAgentEditor(slug)));
+    actions.appendChild(miniBtn("🗑", () => removeStage(slug)));
+    row.append(label, actions);
+    list.appendChild(row);
+  });
+}
+function renderCustomFileTabs() {
+  const tabs = $("filetabs");
+  tabs.innerHTML = "";
+  for (const slug of customStages) {
+    const name = `${slug}.md`;
+    const btn = document.createElement("button");
+    btn.textContent = name;
+    if (name === activeFile) btn.classList.add("active");
+    btn.onclick = () => showFile(name);
+    tabs.appendChild(btn);
+  }
+}
+function renderCustom() {
+  renderCustomStages();
+  renderCustomCrew();
+  renderCustomFileTabs();
+  ($("run-btn") as HTMLButtonElement).disabled = !customStages.length || running;
+}
+async function moveStage(i: number, dir: number) {
+  const j = i + dir;
+  if (j < 0 || j >= customStages.length) return;
+  const tmp = customStages[i];
+  customStages[i] = customStages[j];
+  customStages[j] = tmp;
+  await saveCustomOrder();
+}
+async function removeStage(slug: string) {
+  customStages = customStages.filter((s) => s !== slug);
+  await saveCustomOrder();
+}
+async function saveCustomOrder() {
+  if (!project) return;
+  try {
+    await invoke("write_custom_pipeline", { project, agents: customStages });
+  } catch (e) {
+    appendLog({ run_id: DEFAULT_RUN, kind: "stderr", text: `pipeline save: ${e}`, raw: "" });
+  }
+  renderCustom();
+}
+
+// Add-agent modal (manual editor + optional AI-generate)
+function setCaStatus(msg: string, isErr = false) {
+  $("ca-status").textContent = msg;
+  $("ca-status").classList.toggle("err", isErr);
+}
+function caSlug(): string {
+  return ($("ca-name") as HTMLInputElement).value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+function openCustomAgentModal() {
+  pendingGenName = null;
+  ($("ca-name") as HTMLInputElement).value = "";
+  ($("ca-desc") as HTMLInputElement).value = "";
+  ($("ca-text") as HTMLTextAreaElement).value = DEFAULT_AGENT_TEMPLATE;
+  setCaStatus("");
+  ($("ca-generate") as HTMLButtonElement).disabled = false;
+  $("custom-agent-modal").classList.remove("hidden");
+  ($("ca-name") as HTMLInputElement).focus();
+}
+function closeCustomAgentModal() {
+  $("custom-agent-modal").classList.add("hidden");
+}
+async function generateAgent() {
+  if (!project) return;
+  const name = caSlug();
+  if (!name) {
+    setCaStatus("enter a name first", true);
+    return;
+  }
+  const desc = ($("ca-desc") as HTMLInputElement).value.trim();
+  if (!desc) {
+    setCaStatus("describe the agent to generate", true);
+    return;
+  }
+  setCaStatus("generating…");
+  ($("ca-generate") as HTMLButtonElement).disabled = true;
+  pendingGenName = name;
+  try {
+    await invoke("build_agent", { project, name, prompt: desc });
+  } catch (e) {
+    setCaStatus(`generate error: ${e}`, true);
+    ($("ca-generate") as HTMLButtonElement).disabled = false;
+    pendingGenName = null;
+  }
+}
+// Ensure the frontmatter `name` equals the slug and fill <name> placeholders, so the
+// orchestrator can delegate to it and the handoff path is right.
+function withName(content: string, slug: string): string {
+  return content.replace(/^name:[ \t]*.*$/m, `name: ${slug}`).split("<name>").join(slug);
+}
+async function saveCustomAgent() {
+  if (!project) return;
+  const name = caSlug();
+  if (!name) {
+    setCaStatus("enter a name", true);
+    return;
+  }
+  try {
+    await invoke("write_agent_file", { project, agent: name, content: withName(($("ca-text") as HTMLTextAreaElement).value, name) });
+    if (!customStages.includes(name)) customStages.push(name);
+    await saveCustomOrder();
+    await loadCustomPipeline();
+    renderCustom();
+    closeCustomAgentModal();
+  } catch (e) {
+    setCaStatus(`save error: ${e}`, true);
+  }
+}
+
 // ---- Mode switching ----
 function setMode(mode: AppMode) {
   appMode = mode;
   fastMode = mode === "fast";
+  customMode = mode === "custom";
   localStorage.setItem("foreman.mode", mode);
-  const showDefault = mode === "default" || mode === "fast"; // fast reuses the default pane
+  const showDefault = mode === "default" || mode === "fast" || mode === "custom"; // these reuse the default pane
   ($("mode-default") as HTMLElement).hidden = !showDefault;
   ($("mode-default") as HTMLElement).classList.toggle("fast", fastMode);
+  ($("mode-default") as HTMLElement).classList.toggle("custom", customMode);
   ($("mode-parallel") as HTMLElement).hidden = mode !== "parallel";
   ($("mode-history") as HTMLElement).hidden = mode !== "history";
   ($("mode-skills") as HTMLElement).hidden = mode !== "skills";
@@ -1186,11 +1426,14 @@ function setMode(mode: AppMode) {
     mode === "parallel" ? "overnight"
       : mode === "history" ? "history"
       : mode === "fast" ? "fast"
+      : mode === "custom" ? "custom"
       : mode === "skills" ? "skills"
       : "agent pipeline";
   $("menu").classList.add("hidden");
+  if (showDefault && !customMode) refreshStatus(); // restore the default crew/file tabs
   if (mode === "history") renderHistory();
   if (mode === "skills") renderSkills();
+  if (mode === "custom") void loadCustomPipeline().then(renderCustom);
 }
 
 // ---- Shipper window (5th agent) ----
@@ -1230,6 +1473,20 @@ listen("skillbuild-done", () => {
   $("skillbuild-state").textContent = "done ✓";
   writeLogLine($("skillbuild-log"), "system", "✓ skill builder finished");
   renderSkills(); // the new skill now shows up in the list
+});
+listen<{ kind: string; text: string }>("agentbuild-log", (e) => {
+  if (e.payload.kind === "tool") setCaStatus(`generating… ${e.payload.text}`);
+});
+listen("agentbuild-done", async () => {
+  ($("ca-generate") as HTMLButtonElement).disabled = false;
+  if (pendingGenName && project) {
+    try {
+      ($("ca-text") as HTMLTextAreaElement).value = await invoke<string>("read_agent_file", { project, agent: pendingGenName });
+      setCaStatus("generated — review & Add to pipeline");
+    } catch {
+      setCaStatus("generated (couldn't reload the file)", true);
+    }
+  }
 });
 
 // ---- Boot ----
@@ -1298,6 +1555,11 @@ $("skill-create").addEventListener("click", submitNewSkill);
 $("skill-save").addEventListener("click", saveSkill);
 $("skillbuild-run").addEventListener("click", buildSkill);
 $("skillbuild-cancel").addEventListener("click", cancelSkillBuild);
+$("custom-add").addEventListener("click", openCustomAgentModal);
+$("ca-close").addEventListener("click", closeCustomAgentModal);
+$("ca-cancel").addEventListener("click", closeCustomAgentModal);
+$("ca-generate").addEventListener("click", generateAgent);
+$("ca-save").addEventListener("click", saveCustomAgent);
 ($("skill-new-name") as HTMLInputElement).addEventListener("keydown", (e) => {
   if (e.key === "Enter") {
     e.preventDefault();
